@@ -63,10 +63,10 @@ def test_sustainability_integration() -> None:
     print(f"Horas-Vehículo de retraso: {baseline_emissions_opt['total_veh_hours']:.3f} veh-h")
 
     print("\n" + "=" * 80)
-    print("REPORTE COMPARATIVO")
+    print("EXPORTACIÓN A EXCEL")
     print("=" * 80)
-    report = analyzer_optimized.generate_sustainability_report()
-    print(report)
+    filepath = analyzer_optimized.export_to_excel("reporte_sostenibilidad.xlsx")
+    print(f"Reporte Excel generado: {filepath}")
 
     print("\n✓ PRUEBA DE INTEGRACIÓN COMPLETADA EXITOSAMENTE\n")
 
