@@ -21,8 +21,8 @@ from modulo_explicativo import ModuloExplicativo
 # Dimensiones iniciales
 INITIAL_WIDTH = 1400
 INITIAL_HEIGHT = 900
-MIN_WIDTH = 1000
-MIN_HEIGHT = 640
+MIN_WIDTH = 900
+MIN_HEIGHT = 560
 
 ROAD_WIDTH = 130
 
@@ -440,8 +440,29 @@ class SimpleSlider:
 class TrafficSimulationFrontend:
     """Frontend interactivo, responsive y moderno con panel de control y métricas."""
 
+    @staticmethod
+    def _fit_to_desktop(width: int, height: int) -> tuple[int, int]:
+        """Reduce el tamaño solicitado para que quepa en el escritorio (deja margen).
+
+        Evita que la ventana inicial sea más grande que la pantalla en laptops chicas.
+        """
+        try:
+            desktop = pygame.display.get_desktop_sizes()[0]
+            dw, dh = int(desktop[0]), int(desktop[1])
+        except Exception:  # noqa: BLE001
+            info = pygame.display.Info()
+            dw, dh = info.current_w, info.current_h
+        if dw > 0 and dh > 0:
+            width = min(width, int(dw * 0.92))
+            height = min(height, int(dh * 0.90))
+        # No bajar del mínimo salvo que la propia pantalla sea más pequeña
+        width = max(min(MIN_WIDTH, dw or MIN_WIDTH), width) if width < MIN_WIDTH else width
+        height = max(min(MIN_HEIGHT, dh or MIN_HEIGHT), height) if height < MIN_HEIGHT else height
+        return width, height
+
     def __init__(self, width: int = INITIAL_WIDTH, height: int = INITIAL_HEIGHT) -> None:
         pygame.init()
+        width, height = self._fit_to_desktop(width, height)
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         pygame.display.set_caption("Smart Intersection · Simulador de Tráfico 2D")
         self.clock = pygame.time.Clock()
@@ -517,9 +538,10 @@ class TrafficSimulationFrontend:
 
     def update_layout(self) -> None:
         """Recalcula el layout de los elementos según el tamaño de la ventana."""
-        self.margin = 16
-        self.left_panel_width = 268
-        self.right_panel_width = 316
+        self.margin = 12 if self.width < 1200 else 16
+        # Paneles laterales escalables (más angostos en ventanas chicas)
+        self.left_panel_width = int(min(268, max(210, self.width * 0.19)))
+        self.right_panel_width = int(min(316, max(250, self.width * 0.22)))
         self.left_panel_rect = pygame.Rect(
             self.margin, self.margin, self.left_panel_width, self.height - 2 * self.margin)
         self.right_panel_rect = pygame.Rect(
