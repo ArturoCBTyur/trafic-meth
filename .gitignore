@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Salidas generadas por la app
+reporte_sostenibilidad_*.xlsx
+datos_trafico_*.csv
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,71 +1,373 @@
-"""Frontend mejorado con Pygame - Ventana redimensionable, responsive y sin elementos superpuestos."""
+"""Frontend Pygame ultra-moderno: tema oscuro, glassmorphism, glow y vehículos con estilo.
+
+La lógica de simulación (motor numérico, semáforos, sostenibilidad, eventos) es idéntica
+a la versión previa; solo se rediseñó por completo la capa de presentación.
+"""
 
 from __future__ import annotations
 
-import random
-from typing import Callable
+import math
 import os
+import random
+import re
+from typing import Callable
 
 import numpy as np
 import pygame
 
 from numerical_engine import TrafficSimulationEngine, SustainabilityAnalyzer
+from modulo_explicativo import ModuloExplicativo
 
 # Dimensiones iniciales
 INITIAL_WIDTH = 1400
 INITIAL_HEIGHT = 900
-MIN_WIDTH = 900
-MIN_HEIGHT = 600
+MIN_WIDTH = 1000
+MIN_HEIGHT = 640
 
-ROAD_WIDTH = 100
+ROAD_WIDTH = 130
 
-# Colores
-BACKGROUND_COLOR = (15, 15, 15)
-ROAD_COLOR = (50, 50, 50)
-LANE_COLOR = (200, 200, 200)
-CENTER_COLOR = (255, 215, 0)
-VEHICLE_COLOR = (255, 100, 100)
-VEHICLE_QUEUE_COLOR = (255, 50, 50)
-TRAFFIC_LIGHT_RED = (255, 50, 50)
-TRAFFIC_LIGHT_GREEN = (50, 255, 50)
-TRAFFIC_LIGHT_YELLOW = (255, 255, 50)
-BUTTON_COLOR = (100, 150, 255)
-BUTTON_HOVER_COLOR = (120, 170, 255)
-BUTTON_ACTIVE_COLOR = (80, 120, 255)
-TEXT_COLOR = (255, 255, 255)
-SLIDER_COLOR = (150, 150, 150)
-SLIDER_TRACK_COLOR = (80, 80, 80)
-PANEL_BG_COLOR = (25, 25, 35)
-PANEL_BORDER_COLOR = (80, 80, 100)
-SUCCESS_COLOR = (100, 255, 100)
-ERROR_COLOR = (255, 100, 100)
+# Movimiento de vehículos (capa visual)
+VEHICLE_SPEED = 170.0   # px/s
+VEHICLE_GAP = 30.0      # separación mínima entre autos (car-following)
+LANE_OFFSET = 22        # desplazamiento lateral respecto al eje de la vía
+
+# ----------------------------------------------------------------------------
+# PALETA MODERNA (dark UI + acentos neón)
+# ----------------------------------------------------------------------------
+BG_TOP = (17, 21, 30)
+BG_BOTTOM = (9, 11, 16)
+
+GLASS_FILL = (22, 27, 37)
+GLASS_ALPHA = 205
+GLASS_BORDER = (58, 66, 82)
+HAIRLINE = (40, 46, 58)
+
+TEXT_COLOR = (234, 239, 246)
+TEXT_DIM = (139, 149, 165)
+TEXT_FAINT = (95, 104, 120)
+
+ACCENT = (88, 166, 255)        # azul
+ACCENT_CYAN = (86, 211, 231)   # cian
+ACCENT_PURPLE = (176, 132, 255)
+ACCENT_ORANGE = (255, 148, 92)
+SUCCESS_COLOR = (63, 201, 120)
+WARN_COLOR = (240, 185, 74)
+ERROR_COLOR = (248, 92, 102)
+
+ROAD_TOP = (40, 45, 54)
+ROAD_BOTTOM = (26, 29, 36)
+LANE_COLOR = (206, 213, 226)
+CENTER_COLOR = (245, 191, 66)
+
+# Colores de acento por aproximación (N-S, E-O, S-N, O-E)
+APPROACH_COLORS = [ACCENT, ACCENT_CYAN, ACCENT_PURPLE, ACCENT_ORANGE]
+
+TRAFFIC_LIGHT_GREEN = (61, 214, 140)
+TRAFFIC_LIGHT_RED = (248, 92, 102)
+
+# Compat (usado por status/reporte)
+PANEL_BG_COLOR = GLASS_FILL
+PANEL_BORDER_COLOR = GLASS_BORDER
+
+_gradient_cache: dict[tuple, pygame.Surface] = {}
+
+
+def make_font(size: int, bold: bool = False) -> pygame.font.Font:
+    """Carga una fuente moderna del sistema con fallback."""
+    font = pygame.font.SysFont(
+        "Segoe UI,Roboto,Helvetica Neue,DejaVu Sans,Arial", size, bold=bold
+    )
+    return font
+
+
+def vertical_gradient(width: int, height: int, top: tuple, bottom: tuple) -> pygame.Surface:
+    """Devuelve (cacheada) una superficie con degradado vertical."""
+    key = (width, height, top, bottom)
+    cached = _gradient_cache.get(key)
+    if cached is not None:
+        return cached
+    surf = pygame.Surface((width, height))
+    if height <= 1:
+        surf.fill(top)
+    else:
+        for y in range(height):
+            t = y / (height - 1)
+            color = (
+                int(top[0] + (bottom[0] - top[0]) * t),
+                int(top[1] + (bottom[1] - top[1]) * t),
+                int(top[2] + (bottom[2] - top[2]) * t),
+            )
+            pygame.draw.line(surf, color, (0, y), (width, y))
+    if len(_gradient_cache) > 40:
+        _gradient_cache.clear()
+    _gradient_cache[key] = surf
+    return surf
+
+
+def draw_glow(screen: pygame.Surface, center: tuple, radius: int, color: tuple,
+              layers: int = 7, max_alpha: int = 95) -> None:
+    """Dibuja un halo suave (glow) alrededor de un punto."""
+    radius = max(1, int(radius))
+    surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+    for i in range(layers, 0, -1):
+        t = i / layers
+        alpha = int(max_alpha * (t * t))
+        r = int(radius * t)
+        pygame.draw.circle(surf, (*color, alpha), (radius, radius), r)
+    screen.blit(surf, (int(center[0] - radius), int(center[1] - radius)),
+                special_flags=pygame.BLEND_RGBA_ADD)
+
+
+def glass_panel(screen: pygame.Surface, rect: pygame.Rect, radius: int = 16,
+                fill: tuple = GLASS_FILL, alpha: int = GLASS_ALPHA,
+                border: tuple = GLASS_BORDER, accent: tuple | None = None) -> None:
+    """Dibuja un panel translúcido estilo glassmorphism con borde fino."""
+    surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    pygame.draw.rect(surf, (*fill, alpha), surf.get_rect(), border_radius=radius)
+    pygame.draw.rect(surf, (*border, 180), surf.get_rect(), width=1, border_radius=radius)
+    screen.blit(surf, rect.topleft)
+    if accent is not None:
+        pygame.draw.rect(screen, accent, (rect.x, rect.y + 12, 3, 22), border_radius=2)
+
+
+def latex_to_display(latex: str) -> str:
+    """Convierte una fórmula LaTeX a texto plano legible (solo presentación en la UI).
+
+    No intenta un render completo de LaTeX (pygame no lo soporta): sustituye los
+    comandos comunes por símbolos unicode y aplana fracciones/sub/superíndices para
+    mostrar la fórmula de forma comprensible en un cuadro de texto.
+    """
+    s = latex
+    replacements = {
+        # Casos compuestos primero (contienen \, que se sustituiría luego)
+        r"_{i\,impar}": " (i impar) ", r"_{i\,par}": " (i par) ",
+        r"\qquad": "    ", r"\quad": "   ", r"\,": " ", r"\!": "", r"\;": " ",
+        r"\left": "", r"\right": "", r"\int": "∫", r"\sum": "Σ", r"\Delta": "Δ",
+        r"\approx": "≈", r"\cdot": "·", r"\times": "×", r"\tilde": "~", r"\frac": "frac",
+    }
+    for key, val in replacements.items():
+        s = s.replace(key, val)
+    s = re.sub(r"frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", s)
+    s = re.sub(r"_\{([^{}]*)\}", r"_\1", s)
+    s = re.sub(r"\^\{([^{}]*)\}", r"^\1", s)
+    s = s.replace("{", "").replace("}", "").replace("\\", "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def wrap_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+    """Divide un texto en líneas que caben en max_width píxeles."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if font.size(trial)[0] <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+class HelpOverlay:
+    """Modal de 'Didáctica Numérica': consume ModuloExplicativo y lo muestra en pantalla."""
+
+    SHORT = {
+        "newton_raphson": "Newton-Raphson",
+        "euler_modificado": "Euler Mod. (Heun)",
+        "simpson": "Simpson 1/3",
+    }
+
+    def __init__(self, modulo: ModuloExplicativo) -> None:
+        self.modulo = modulo
+        self.ids = modulo.metodos_disponibles()
+        self.index = 0
+        self.visible = False
+        self.tab_rects: list[tuple[pygame.Rect, int]] = []
+        self.close_rect: pygame.Rect | None = None
+
+    def toggle(self) -> None:
+        self.visible = not self.visible
+
+    def switch(self, i: int) -> None:
+        self.index = i % len(self.ids)
+
+    def next(self) -> None:
+        self.index = (self.index + 1) % len(self.ids)
+
+    def prev(self) -> None:
+        self.index = (self.index - 1) % len(self.ids)
+
+    def handle_click(self, pos: tuple[int, int]) -> bool:
+        """Procesa un clic dentro del modal. Devuelve True si consumió el evento."""
+        if not self.visible:
+            return False
+        if self.close_rect and self.close_rect.collidepoint(pos):
+            self.visible = False
+            return True
+        for rect, i in self.tab_rects:
+            if rect.collidepoint(pos):
+                self.index = i
+                return True
+        return True  # modal: absorbe todos los clics mientras está abierto
+
+    def draw(self, screen: pygame.Surface, fonts: dict, width: int, height: int) -> None:
+        if not self.visible:
+            return
+        f_title = fonts["title"]
+        f_sec = fonts["section"]
+        f_body = fonts["body"]
+        f_mono = fonts["mono"]
+        f_tiny = fonts["tiny"]
+
+        # Fondo oscurecido (scrim)
+        scrim = pygame.Surface((width, height), pygame.SRCALPHA)
+        scrim.fill((0, 0, 0, 150))
+        screen.blit(scrim, (0, 0))
+
+        w = min(780, width - 80)
+        h = min(600, height - 80)
+        modal = pygame.Rect(0, 0, w, h)
+        modal.center = (width // 2, height // 2)
+        glass_panel(screen, modal, radius=18, alpha=248, accent=ACCENT_CYAN)
+
+        leccion = self.modulo.obtener_informacion(self.ids[self.index])
+        pad = 24
+        x = modal.x + pad
+        content_w = modal.width - 2 * pad
+        y = modal.y + 18
+
+        # Encabezado
+        header = f_tiny.render("DIDÁCTICA NUMÉRICA", True, ACCENT_CYAN)
+        screen.blit(header, (x, y))
+        # Botón cerrar
+        self.close_rect = pygame.Rect(modal.right - 40, modal.y + 14, 26, 26)
+        pygame.draw.rect(screen, (48, 40, 46), self.close_rect, border_radius=8)
+        cx = f_sec.render("X", True, (230, 160, 160))
+        screen.blit(cx, cx.get_rect(center=self.close_rect.center))
+        y += 22
+        screen.blit(f_title.render(leccion.nombre, True, TEXT_COLOR), (x, y))
+        y += 30
+        screen.blit(f_tiny.render(leccion.unidad, True, TEXT_DIM), (x, y))
+        y += 26
+
+        # Pestañas de método
+        self.tab_rects = []
+        tx = x
+        for i, mid in enumerate(self.ids):
+            label = self.SHORT.get(mid, mid)
+            tw = f_tiny.size(label)[0] + 24
+            tab = pygame.Rect(tx, y, tw, 26)
+            active = (i == self.index)
+            pygame.draw.rect(screen, ACCENT if active else (36, 42, 54), tab, border_radius=8)
+            pygame.draw.rect(screen, ACCENT if active else HAIRLINE, tab, width=1, border_radius=8)
+            ts = f_tiny.render(label, True, (255, 255, 255) if active else TEXT_DIM)
+            screen.blit(ts, ts.get_rect(center=tab.center))
+            self.tab_rects.append((tab, i))
+            tx += tw + 8
+        y += 40
+
+        # Caja de fórmula
+        formula = latex_to_display(leccion.formula_latex)
+        fbox = pygame.Rect(x, y, content_w, 46)
+        pygame.draw.rect(screen, (18, 26, 32), fbox, border_radius=10)
+        pygame.draw.rect(screen, (40, 70, 80), fbox, width=1, border_radius=10)
+        flabel = f_tiny.render("FÓRMULA", True, ACCENT_CYAN)
+        screen.blit(flabel, (fbox.x + 12, fbox.y + 6))
+        fsurf = f_mono.render(formula, True, (210, 230, 240))
+        if fsurf.get_width() > content_w - 24:  # reescalar si no cabe
+            scale = (content_w - 24) / fsurf.get_width()
+            fsurf = pygame.transform.smoothscale(
+                fsurf, (int(fsurf.get_width() * scale), int(fsurf.get_height() * scale)))
+        screen.blit(fsurf, (fbox.x + 12, fbox.y + 22))
+        y += 58
+
+        def section(title: str, text: str, y0: int, color: tuple) -> int:
+            screen.blit(f_sec.render(title, True, color), (x, y0))
+            y0 += 22
+            for line in wrap_text(text, f_body, content_w):
+                screen.blit(f_body.render(line, True, (206, 214, 226)), (x, y0))
+                y0 += 20
+            return y0 + 8
+
+        y = section("OBJETIVO EN EL SIMULADOR", leccion.objetivo, y, SUCCESS_COLOR)
+        y = section("JUSTIFICACIÓN ACADÉMICA", leccion.justificacion, y, WARN_COLOR)
+
+        # Paso a paso
+        screen.blit(f_sec.render("PASO A PASO", True, ACCENT_PURPLE), (x, y))
+        y += 22
+        for paso in leccion.pasos:
+            for k, line in enumerate(wrap_text(paso, f_body, content_w - 12)):
+                screen.blit(f_body.render(line, True, (206, 214, 226)), (x + (0 if k == 0 else 14), y))
+                y += 19
+            y += 2
+
+        hint = f_tiny.render("← → cambiar método   ·   H / ESC cerrar", True, TEXT_FAINT)
+        screen.blit(hint, (modal.centerx - hint.get_width() // 2, modal.bottom - 24))
 
 
 class SimpleButton:
-    """Botón interactivo en Pygame."""
+    """Botón moderno con degradado, hover glow y estado presionado."""
 
-    def __init__(self, x: float, y: float, width: float, height: float, text: str) -> None:
+    def __init__(self, x: float, y: float, width: float, height: float, text: str,
+                 accent: tuple = ACCENT, icon: str = "") -> None:
         self.rect = pygame.Rect(x, y, width, height)
         self.text = text
+        self.icon = icon
+        self.accent = accent
         self.hovered = False
         self.active = False
+        self._t = 0.0  # animación hover 0..1
 
     def draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
-        color = BUTTON_ACTIVE_COLOR if self.active else (BUTTON_HOVER_COLOR if self.hovered else BUTTON_COLOR)
-        pygame.draw.rect(screen, color, self.rect)
-        pygame.draw.rect(screen, TEXT_COLOR, self.rect, 2)
-        text_surf = font.render(self.text, True, TEXT_COLOR)
-        text_rect = text_surf.get_rect(center=self.rect.center)
-        screen.blit(text_surf, text_rect)
+        target = 1.0 if self.hovered else 0.0
+        self._t += (target - self._t) * 0.25
+        r = self.rect
+
+        # Sombra
+        shadow = pygame.Surface((r.width + 16, r.height + 16), pygame.SRCALPHA)
+        pygame.draw.rect(shadow, (0, 0, 0, 90), shadow.get_rect(), border_radius=14)
+        screen.blit(shadow, (r.x - 8, r.y - 4))
+
+        # Glow al hacer hover
+        if self._t > 0.02:
+            glow = pygame.Surface((r.width + 30, r.height + 30), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (*self.accent, int(70 * self._t)),
+                             glow.get_rect(), border_radius=18)
+            screen.blit(glow, (r.x - 15, r.y - 15), special_flags=pygame.BLEND_RGBA_ADD)
+
+        # Cuerpo con degradado
+        top = tuple(min(255, int(c + 28 + 22 * self._t)) for c in self.accent)
+        bottom = tuple(max(0, int(c - 30)) for c in self.accent)
+        if self.active:
+            top, bottom = bottom, tuple(max(0, c - 20) for c in bottom)
+        grad = vertical_gradient(r.width, r.height, top, bottom)
+        mask = pygame.Surface((r.width, r.height), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=12)
+        body = grad.copy()
+        body.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        screen.blit(body, r.topleft)
+
+        # Brillo superior
+        gloss = pygame.Surface((r.width - 6, r.height // 2), pygame.SRCALPHA)
+        pygame.draw.rect(gloss, (255, 255, 255, 30), gloss.get_rect(),
+                         border_top_left_radius=12, border_top_right_radius=12)
+        screen.blit(gloss, (r.x + 3, r.y + 2))
+        pygame.draw.rect(screen, (255, 255, 255, 40), r, width=1, border_radius=12)
+
+        label = f"{self.icon}  {self.text}" if self.icon else self.text
+        text_surf = font.render(label, True, (255, 255, 255))
+        screen.blit(text_surf, text_surf.get_rect(center=r.center))
 
     def update(self, mouse_pos: tuple[float, float]) -> None:
         self.hovered = self.rect.collidepoint(mouse_pos)
 
     def is_clicked(self, mouse_pos: tuple[float, float], mouse_pressed: bool) -> bool:
         return self.hovered and mouse_pressed
-    
+
     def reposition(self, x: float, y: float, width: float = None, height: float = None) -> None:
-        """Reposiciona el botón."""
         self.rect.x = x
         self.rect.y = y
         if width is not None:
@@ -75,29 +377,51 @@ class SimpleButton:
 
 
 class SimpleSlider:
-    """Slider horizontal para control de parámetros."""
+    """Slider moderno: pista redondeada, relleno de acento y handle con glow."""
 
-    def __init__(self, x: float, y: float, width: float, min_val: float, max_val: float, initial: float, label: str) -> None:
-        self.rect = pygame.Rect(x, y, width, 30)
+    def __init__(self, x: float, y: float, width: float, min_val: float, max_val: float,
+                 initial: float, label: str, accent: tuple = ACCENT) -> None:
+        self.rect = pygame.Rect(x, y, width, 26)
         self.min_val = min_val
         self.max_val = max_val
         self.value = initial
         self.label = label
+        self.accent = accent
         self.dragging = False
 
-    def draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
-        pygame.draw.rect(screen, SLIDER_TRACK_COLOR, self.rect)
-        pygame.draw.rect(screen, TEXT_COLOR, self.rect, 1)
-
+    def _handle_x(self) -> float:
         normalized = (self.value - self.min_val) / (self.max_val - self.min_val)
-        handle_x = self.rect.x + normalized * self.rect.width
-        pygame.draw.circle(screen, SLIDER_COLOR, (int(handle_x), self.rect.y + 15), 8)
+        return self.rect.x + normalized * self.rect.width
 
-        label_text = font.render(f"{self.label}: {self.value:.1f}s", True, TEXT_COLOR)
-        screen.blit(label_text, (self.rect.x, self.rect.y - 20))
+    def draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
+        cy = self.rect.y + self.rect.height // 2
+
+        # Etiqueta + valor
+        label_surf = font.render(self.label.upper(), True, TEXT_DIM)
+        screen.blit(label_surf, (self.rect.x, self.rect.y - 20))
+        val_surf = font.render(f"{self.value:.0f}s", True, self.accent)
+        screen.blit(val_surf, (self.rect.right - val_surf.get_width(), self.rect.y - 20))
+
+        # Pista base
+        track = pygame.Rect(self.rect.x, cy - 3, self.rect.width, 6)
+        pygame.draw.rect(screen, (46, 52, 64), track, border_radius=3)
+
+        # Relleno
+        handle_x = self._handle_x()
+        fill_w = max(0, int(handle_x - self.rect.x))
+        if fill_w > 0:
+            fill = pygame.Rect(self.rect.x, cy - 3, fill_w, 6)
+            pygame.draw.rect(screen, self.accent, fill, border_radius=3)
+
+        # Handle con glow
+        draw_glow(screen, (handle_x, cy), 16, self.accent, layers=5, max_alpha=70)
+        pygame.draw.circle(screen, (245, 248, 252), (int(handle_x), cy), 9)
+        pygame.draw.circle(screen, self.accent, (int(handle_x), cy), 9, 3)
 
     def update(self, mouse_pos: tuple[float, float], mouse_pressed: bool) -> None:
-        if mouse_pressed and self.rect.collidepoint(mouse_pos):
+        hit = pygame.Rect(self.rect.x - 6, self.rect.y - 6,
+                          self.rect.width + 12, self.rect.height + 12)
+        if mouse_pressed and hit.collidepoint(mouse_pos):
             self.dragging = True
         elif not mouse_pressed:
             self.dragging = False
@@ -106,73 +430,28 @@ class SimpleSlider:
             normalized = (mouse_pos[0] - self.rect.x) / self.rect.width
             normalized = max(0.0, min(1.0, normalized))
             self.value = self.min_val + normalized * (self.max_val - self.min_val)
-    
+
     def reposition(self, x: float, y: float, width: float) -> None:
-        """Reposiciona el slider."""
         self.rect.x = x
         self.rect.y = y
         self.rect.width = width
 
 
-class ReportPanel:
-    """Panel para mostrar el reporte de sostenibilidad con scroll."""
-
-    def __init__(self, x: float, y: float, width: float, height: float) -> None:
-        self.rect = pygame.Rect(x, y, width, height)
-        self.text_lines = []
-        self.scroll_offset = 0
-        self.line_height = 16
-        self.visible = False
-
-    def set_report(self, report_text: str) -> None:
-        """Establece el texto del reporte."""
-        self.text_lines = report_text.split('\n')
-        self.scroll_offset = 0
-
-    def handle_scroll(self, mouse_wheel_y: int) -> None:
-        """Maneja el scroll del mouse."""
-        self.scroll_offset -= mouse_wheel_y * 3
-        max_scroll = max(0, len(self.text_lines) * self.line_height - self.rect.height)
-        self.scroll_offset = max(0, min(self.scroll_offset, max_scroll))
-
-    def draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
-        """Dibuja el panel del reporte."""
-        if not self.visible:
-            return
-
-        # Fondo
-        pygame.draw.rect(screen, PANEL_BG_COLOR, self.rect)
-        pygame.draw.rect(screen, PANEL_BORDER_COLOR, self.rect, 2)
-
-        # Crear surface de clipping
-        clip_rect = self.rect.copy()
-        screen.set_clip(clip_rect)
-
-        # Dibujar líneas
-        y_pos = self.rect.y - self.scroll_offset
-        for line in self.text_lines:
-            if y_pos > self.rect.bottom:
-                break
-            if y_pos + self.line_height > self.rect.y:
-                text_surf = font.render(line, True, TEXT_COLOR)
-                screen.blit(text_surf, (self.rect.x + 10, y_pos))
-            y_pos += self.line_height
-
-        screen.set_clip(None)
-
-
 class TrafficSimulationFrontend:
-    """Frontend interactivo redimensionable con sensores, control de semáforos y visualización de métricas."""
+    """Frontend interactivo, responsive y moderno con panel de control y métricas."""
 
     def __init__(self, width: int = INITIAL_WIDTH, height: int = INITIAL_HEIGHT) -> None:
         pygame.init()
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
-        pygame.display.set_caption("Simulador de Tráfico 2D - Métodos Numéricos")
+        pygame.display.set_caption("Smart Intersection · Simulador de Tráfico 2D")
         self.clock = pygame.time.Clock()
-        self.font_tiny = pygame.font.SysFont(None, 14)
-        self.font_small = pygame.font.SysFont(None, 16)
-        self.font_medium = pygame.font.SysFont(None, 20)
-        self.font_large = pygame.font.SysFont(None, 28)
+        self.font_tiny = make_font(14)
+        self.font_small = make_font(16)
+        self.font_mono = pygame.font.SysFont("Consolas,DejaVu Sans Mono,monospace", 14)
+        self.font_medium = make_font(19)
+        self.font_semibold = make_font(17, bold=True)
+        self.font_large = make_font(26, bold=True)
+        self.font_metric = make_font(24, bold=True)
 
         self.width = width
         self.height = height
@@ -181,7 +460,16 @@ class TrafficSimulationFrontend:
 
         self.discrete_counts = [0, 0, 0, 0]
         self.spawn_timers = [0.0, 0.0, 0.0, 0.0]
-        self.spawn_probability = 0.15
+        # Demanda ambiental ASIMÉTRICA (arteria vs calle secundaria), aleatoria por
+        # sesión. Un eje es "arteria" (alta) y el otro "secundaria" (baja) → la demanda
+        # está naturalmente desbalanceada, por lo que la optimización SÍ reduce CO2.
+        self.spawn_probabilities = self._make_traffic_pattern()
+        self.spawn_probability = max(self.spawn_probabilities)  # para el gate del timer
+
+        # Vehículos animados por aproximación. Cada auto es {'p': posición sobre el
+        # eje de viaje, negativa = acercándose, positiva = ya cruzó}.
+        self.vehicles: list[list[dict]] = [[], [], [], []]
+        self.pending_spawns = [0, 0, 0, 0]
 
         self.green_time_ns = 25.0
         self.green_time_ew = 25.0
@@ -190,65 +478,152 @@ class TrafficSimulationFrontend:
         self.light_state = "green_ns"
 
         # Crear elementos UI
-        self.optimize_button = SimpleButton(0, 0, 180, 40, "Optimizar")
-        self.report_button = SimpleButton(0, 0, 180, 40, "Gen. Reporte")
-        self.green_ns_slider = SimpleSlider(0, 0, 200, 5.0, 60.0, 25.0, "Verde N-S")
-        self.green_ew_slider = SimpleSlider(0, 0, 200, 5.0, 60.0, 25.0, "Verde E-O")
+        self.optimize_button = SimpleButton(0, 0, 180, 44, "Optimizar", ACCENT)
+        self.export_button = SimpleButton(0, 0, 180, 44, "Exportar Excel", SUCCESS_COLOR)
+        self.help_button = SimpleButton(0, 0, 180, 40, "? Ayuda didáctica", ACCENT_PURPLE)
+
+        # Capa de Didáctica Numérica (consume ModuloExplicativo)
+        self.modulo_explicativo = ModuloExplicativo()
+        self.help_overlay = HelpOverlay(self.modulo_explicativo)
+        self.green_ns_slider = SimpleSlider(0, 0, 200, 5.0, 60.0, 25.0, "Verde N-S", ACCENT)
+        self.green_ew_slider = SimpleSlider(0, 0, 200, 5.0, 60.0, 25.0, "Verde E-O", ACCENT_CYAN)
 
         self.newton_iterations = 0
         self.newton_converged = False
         self.last_optimization_time = 0.0
         self.baseline_set = False
-        self.report_generated = False
-        
-        # Panel de reporte y status
-        self.report_panel = ReportPanel(0, 0, 400, 300)
+
+        # Toast de estado
         self.status_message = ""
         self.status_timer = 0.0
         self.status_color = SUCCESS_COLOR
-        self.show_report = False
+
+        # Música de fondo (Tetris / Korobeiniki sintetizada). Falla en silencio si no
+        # hay dispositivo de audio (p. ej. headless).
+        self.music = None
+        self.music_on = False
+        try:
+            if pygame.mixer.get_init() is None:
+                pygame.mixer.init()
+            from music import make_tetris_sound
+            self.music = make_tetris_sound()
+            self.music.play(loops=-1)
+            self.music_on = True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Audio no disponible, sin música: {exc}")
 
         self.running = True
         self.update_layout()
 
     def update_layout(self) -> None:
         """Recalcula el layout de los elementos según el tamaño de la ventana."""
-        # Paneles: Izquierda (controles), Centro (visualización), Derecha (métricas)
-        self.left_panel_width = 250
-        self.right_panel_width = 300
-        self.center_start_x = self.left_panel_width + 10
-        self.center_width = max(300, self.width - self.left_panel_width - self.right_panel_width - 20)
-        
-        # Posiciones de botones
-        button_x = 20
+        self.margin = 16
+        self.left_panel_width = 268
+        self.right_panel_width = 316
+        self.left_panel_rect = pygame.Rect(
+            self.margin, self.margin, self.left_panel_width, self.height - 2 * self.margin)
+        self.right_panel_rect = pygame.Rect(
+            self.width - self.right_panel_width - self.margin, self.margin,
+            self.right_panel_width, self.height - 2 * self.margin)
+
+        self.center_start_x = self.left_panel_rect.right + self.margin
+        self.center_width = max(
+            320, self.right_panel_rect.left - self.center_start_x - self.margin)
+
+        # Botones
+        button_x = self.left_panel_rect.x + 20
         button_width = self.left_panel_width - 40
-        self.optimize_button.reposition(button_x, 20, button_width, 40)
-        self.report_button.reposition(button_x, 70, button_width, 40)
-        
-        # Posiciones de sliders
-        slider_x = 20
-        slider_width = self.left_panel_width - 40
-        self.green_ns_slider.reposition(slider_x, 140, slider_width)
-        self.green_ew_slider.reposition(slider_x, 220, slider_width)
-        
-        # Posición del panel de reporte
-        report_panel_x = self.center_start_x
-        report_panel_y = self.height - 250
-        report_panel_width = self.center_width
-        report_panel_height = 240
-        self.report_panel.rect.x = report_panel_x
-        self.report_panel.rect.y = report_panel_y
-        self.report_panel.rect.width = report_panel_width
-        self.report_panel.rect.height = report_panel_height
+        self.optimize_button.reposition(button_x, self.left_panel_rect.y + 70, button_width, 44)
+        self.export_button.reposition(button_x, self.left_panel_rect.y + 124, button_width, 44)
+        self.help_button.reposition(button_x, self.left_panel_rect.y + 178, button_width, 40)
+
+        # Sliders
+        self.green_ns_slider.reposition(button_x, self.left_panel_rect.y + 268, button_width)
+        self.green_ew_slider.reposition(button_x, self.left_panel_rect.y + 336, button_width)
+
+    def _make_traffic_pattern(self) -> list[float]:
+        """Genera un patrón de demanda asimétrico realista (arteria vs secundaria).
+
+        Elige al azar qué eje es la arteria (alta demanda) y cuál la calle secundaria
+        (baja), con jitter por carril. Así la demanda ambiental está desbalanceada y la
+        optimización de semáforos produce una reducción de CO2 no trivial.
+        """
+        hi = random.uniform(0.22, 0.34)   # arteria
+        lo = random.uniform(0.05, 0.12)   # secundaria
+        jitter = lambda p: max(0.03, p * random.uniform(0.8, 1.2))
+        if random.random() < 0.5:         # N-S arteria
+            return [jitter(hi), jitter(lo), jitter(hi), jitter(lo)]
+        return [jitter(lo), jitter(hi), jitter(lo), jitter(hi)]  # E-O arteria
 
     def spawn_vehicles(self, dt: float) -> None:
-        """Genera vehículos aleatoriamente en las entradas de la intersección."""
+        """Genera vehículos aleatoriamente en las entradas (tasa por carril)."""
         for i in range(4):
+            prob = self.spawn_probabilities[i]
             self.spawn_timers[i] += dt
-            if self.spawn_timers[i] > (1.0 / max(0.1, self.spawn_probability)):
-                if random.random() < self.spawn_probability:
+            if self.spawn_timers[i] > (1.0 / max(0.1, prob)):
+                if random.random() < prob:
                     self.discrete_counts[i] += 1
+                    self.pending_spawns[i] += 1
                     self.spawn_timers[i] = 0.0
+
+    def _lane_pmax(self, idx: int) -> float:
+        """Distancia (px) desde el centro hasta el borde de salida de la vía."""
+        if idx in (0, 2):  # ejes verticales (N-S / S-N)
+            return self.height / 2 - self.margin + 24
+        return self.center_width / 2 + 24  # ejes horizontales (E-O / O-E)
+
+    def _lane_to_screen(self, idx: int, cx: float, cy: float, p: float) -> tuple[float, float]:
+        """Convierte la posición de eje 'p' a coordenadas de pantalla."""
+        if idx == 0:      # N-S: entra arriba, baja
+            return cx - LANE_OFFSET, cy + p
+        elif idx == 2:    # S-N: entra abajo, sube
+            return cx + LANE_OFFSET, cy - p
+        elif idx == 1:    # E-O: entra izquierda, va a la derecha
+            return cx + p, cy + LANE_OFFSET
+        else:             # O-E: entra derecha, va a la izquierda
+            return cx - p, cy - LANE_OFFSET
+
+    def _lane_lead(self, idx: int) -> tuple[int, int]:
+        """Vector de avance (para orientar faros)."""
+        return {0: (0, 1), 2: (0, -1), 1: (1, 0), 3: (-1, 0)}[idx]
+
+    def _entrance_free(self, idx: int) -> bool:
+        """True si hay espacio en la boca de entrada para un nuevo auto."""
+        start = -self._lane_pmax(idx)
+        cars = self.vehicles[idx]
+        if not cars:
+            return True
+        rear = min(c["p"] for c in cars)
+        return rear > start + VEHICLE_GAP
+
+    def update_vehicles(self, dt: float) -> None:
+        """Mueve los autos: avanzan, frenan tras el de adelante o en el semáforo rojo."""
+        # Drenar spawns pendientes cuando la entrada está libre
+        for idx in range(4):
+            if self.pending_spawns[idx] > 0 and self._entrance_free(idx):
+                self.vehicles[idx].append({"p": -self._lane_pmax(idx)})
+                self.pending_spawns[idx] -= 1
+
+        stop_line = -(ROAD_WIDTH // 2 + 12)
+        for idx in range(4):
+            green = (self.light_state == "green_ns" if idx in (0, 2)
+                     else self.light_state == "green_ew")
+            pmax = self._lane_pmax(idx)
+            cars = self.vehicles[idx]
+            cars.sort(key=lambda c: c["p"], reverse=True)  # frente primero
+
+            for i, car in enumerate(cars):
+                desired = car["p"] + VEHICLE_SPEED * dt
+                # Frenar en la línea de pare si el semáforo está rojo (solo si aún no cruzó)
+                if not green and car["p"] <= stop_line:
+                    desired = min(desired, stop_line)
+                # Car-following: no invadir al auto de adelante
+                if i > 0:
+                    desired = min(desired, cars[i - 1]["p"] - VEHICLE_GAP)
+                car["p"] = desired
+
+            # Despawn de los que ya salieron del área
+            self.vehicles[idx] = [c for c in cars if c["p"] <= pmax]
 
     def update_traffic_light(self, dt: float) -> None:
         """Actualiza el estado del semáforo basándose en temporizadores."""
@@ -271,188 +646,281 @@ class TrafficSimulationFrontend:
                 self.light_state = "green_ns"
                 self.traffic_light_timer = 0.0
 
+    def measure_demand(self) -> tuple[float, float]:
+        """Estima la tasa de llegada media (veh/s) por eje desde los sensores.
+
+        lambda_eje = conteo acumulado del eje / tiempo transcurrido → tasa media real
+        de llegadas. Preserva el desbalance N-S vs E-O (más spawns en un eje ⇒ mayor
+        lambda ⇒ Newton le asigna más verde). Unidad III alimenta a la Unidad I.
+        """
+        elapsed = max(1.0, self.engine.current_time)
+        lambda_ns = (self.discrete_counts[0] + self.discrete_counts[2]) / elapsed
+        lambda_ew = (self.discrete_counts[1] + self.discrete_counts[3]) / elapsed
+        return lambda_ns, lambda_ew
+
     def optimize_traffic_signals(self) -> None:
-        """Ejecuta Newton-Raphson para optimizar tiempos de semáforo."""
-        initial_guess = np.array([self.green_time_ns / 30.0, self.green_time_ew / 30.0])
-        result = self.engine.solve_newton_raphson(initial_guess, tol=1e-6, max_iter=20)
+        """Optimiza el reparto de verde acoplando las 3 unidades numéricas.
 
-        self.newton_converged = result["converged"]
-        self.newton_iterations = 20 if not self.newton_converged else 10
+        1. Unidad III: mide la demanda (lambda) por eje desde los sensores.
+        2. Unidad I: Newton-Raphson resuelve el reparto de verde que iguala saturación.
+        3. Unidad IV: Heun proyecta emisiones del plan manual vs. optimizado → reducción.
+        """
+        lambda_ns, lambda_ew = self.measure_demand()
+        if lambda_ns <= 1e-9 and lambda_ew <= 1e-9:
+            self.set_status("Sin demanda medida — spawnea tráfico antes de optimizar", WARN_COLOR)
+            return
 
-        if self.newton_converged:
-            solution = result["solution"]
-            self.green_time_ns = max(5.0, min(60.0, solution[0] * 30.0))
-            self.green_time_ew = max(5.0, min(60.0, solution[1] * 30.0))
-            self.sustainability_analyzer.set_optimized()
-            self.green_ns_slider.value = self.green_time_ns
-            self.green_ew_slider.value = self.green_time_ew
+        g_total = self.green_time_ns + self.green_time_ew
+
+        # Línea base = sincronización MANUAL ingenua (reparto equitativo del mismo
+        # presupuesto de verde). Es la referencia justa contra la que se mide Newton.
+        base = self.engine.project_emissions(
+            g_total / 2.0, g_total / 2.0, lambda_ns, lambda_ew, self.red_time)
+
+        # Newton-Raphson: reparto de verde óptimo dado el flujo medido
+        result = self.engine.solve_green_split(lambda_ns, lambda_ew, g_total)
+        self.newton_converged = bool(result["converged"])
+        self.newton_iterations = int(result["iterations"])
+        sol = result["solution"]
+        opt_ns = float(max(5.0, min(60.0, sol[0])))
+        opt_ew = float(max(5.0, min(60.0, sol[1])))
+
+        # Proyección del plan OPTIMIZADO — mismo horizonte y llegadas
+        opt = self.engine.project_emissions(
+            opt_ns, opt_ew, lambda_ns, lambda_ew, self.red_time)
+
+        # Aplicar tiempos y registrar comparación proyectada
+        self.green_time_ns = opt_ns
+        self.green_time_ew = opt_ew
+        self.green_ns_slider.value = opt_ns
+        self.green_ew_slider.value = opt_ew
+        self.sustainability_analyzer.set_baseline(base["co2"])
+        self.sustainability_analyzer.set_optimized(opt["co2"])
+
+        pct = (base["co2"] - opt["co2"]) / base["co2"] * 100 if base["co2"] > 1e-9 else 0.0
+        self.set_status(
+            f"Optimizado  NS={opt_ns:.0f}s  EO={opt_ew:.0f}s  ·  -{pct:.1f}% CO2",
+            SUCCESS_COLOR)
+
+    # ------------------------------------------------------------------
+    # Helpers de dibujo
+    # ------------------------------------------------------------------
+    def _draw_background(self) -> None:
+        self.screen.blit(vertical_gradient(self.width, self.height, BG_TOP, BG_BOTTOM), (0, 0))
+        # Rejilla sutil de puntos
+        dot = (28, 33, 44)
+        for y in range(40, self.height, 44):
+            for x in range(40, self.width, 44):
+                self.screen.set_at((x, y), dot)
+
+    def _section_label(self, text: str, x: int, y: int, color: tuple = TEXT_FAINT) -> None:
+        surf = self.font_tiny.render(text.upper(), True, color)
+        self.screen.blit(surf, (x, y))
 
     def draw_left_panel(self) -> None:
-        """Dibuja el panel de control izquierdo."""
-        panel_rect = pygame.Rect(0, 0, self.left_panel_width, self.height)
-        pygame.draw.rect(self.screen, PANEL_BG_COLOR, panel_rect)
-        pygame.draw.line(self.screen, PANEL_BORDER_COLOR, (self.left_panel_width, 0), 
-                        (self.left_panel_width, self.height), 2)
-        
-        # Título
-        title = self.font_medium.render("CONTROLES", True, (100, 200, 100))
-        self.screen.blit(title, (20, 5))
-        
-        # Botones
-        self.optimize_button.draw(self.screen, self.font_small)
-        self.report_button.draw(self.screen, self.font_small)
-        
-        # Sliders
+        """Panel de control izquierdo (glass)."""
+        r = self.left_panel_rect
+        glass_panel(self.screen, r, radius=18)
+
+        title = self.font_large.render("CONTROL", True, TEXT_COLOR)
+        self.screen.blit(title, (r.x + 20, r.y + 20))
+        sub = self.font_tiny.render("INTERSECCIÓN INTELIGENTE", True, ACCENT)
+        self.screen.blit(sub, (r.x + 22, r.y + 50))
+
+        self.optimize_button.draw(self.screen, self.font_semibold)
+        self.export_button.draw(self.screen, self.font_semibold)
+        self.help_button.draw(self.screen, self.font_semibold)
+
+        self._section_label("Tiempos de verde", r.x + 20, r.y + 240, TEXT_DIM)
         self.green_ns_slider.draw(self.screen, self.font_tiny)
         self.green_ew_slider.draw(self.screen, self.font_tiny)
-        
-        # Instrucciones
-        instructions = [
-            "Teclas:",
-            "1-4: Spawnear",
-            "O: Optimizar",
-            "G: Reporte",
-            "R: Resetear",
-            "ESC: Salir"
+
+        # Chips de atajos
+        self._section_label("Atajos", r.x + 20, r.y + 384, TEXT_DIM)
+        shortcuts = [
+            ("1-4", "Spawnear"), ("O", "Optimizar"), ("E", "Exportar Excel"),
+            ("H", "Ayuda"), ("M", "Música"), ("R", "Reset"), ("ESC", "Salir"),
         ]
-        y_pos = 310
-        for instr in instructions:
-            text = self.font_tiny.render(instr, True, (150, 150, 150))
-            self.screen.blit(text, (20, y_pos))
-            y_pos += 22
+        y = r.y + 406
+        for key, desc in shortcuts:
+            kw = self.font_tiny.size(key)[0] + 14
+            chip = pygame.Rect(r.x + 20, y, kw, 20)
+            pygame.draw.rect(self.screen, (36, 42, 54), chip, border_radius=6)
+            pygame.draw.rect(self.screen, HAIRLINE, chip, width=1, border_radius=6)
+            ks = self.font_tiny.render(key, True, ACCENT_CYAN)
+            self.screen.blit(ks, ks.get_rect(center=chip.center))
+            ds = self.font_tiny.render(desc, True, TEXT_DIM)
+            self.screen.blit(ds, (chip.right + 10, y + 3))
+            y += 26
+
+    def _metric_row(self, x: int, y: int, w: int, label: str, value: str,
+                    color: tuple = TEXT_COLOR, mono: bool = True) -> None:
+        ls = self.font_tiny.render(label, True, TEXT_DIM)
+        self.screen.blit(ls, (x, y))
+        font = self.font_mono if mono else self.font_small
+        vs = font.render(value, True, color)
+        self.screen.blit(vs, (x + w - vs.get_width(), y - 1))
 
     def draw_right_panel(self) -> None:
-        """Dibuja el panel de métricas derecho."""
-        panel_x = self.width - self.right_panel_width
-        panel_rect = pygame.Rect(panel_x, 0, self.right_panel_width, self.height)
-        pygame.draw.rect(self.screen, PANEL_BG_COLOR, panel_rect)
-        pygame.draw.line(self.screen, PANEL_BORDER_COLOR, (panel_x, 0), (panel_x, self.height), 2)
-        
-        # Título
-        title = self.font_medium.render("MÉTRICAS", True, (100, 150, 255))
-        self.screen.blit(title, (panel_x + 20, 5))
-        
-        y_pos = 40
-        margin = 15
-        
-        # Derivada
-        arrival_derivative = self.engine.arrival_rate_derivative
-        text = self.font_tiny.render(f"R'(t): {arrival_derivative:.4f} v/s", True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 22
-        
-        # Colas
-        queue_text = "Colas:"
-        text = self.font_tiny.render(queue_text, True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 18
+        """Panel de métricas derecho (glass) con tarjetas."""
+        r = self.right_panel_rect
+        glass_panel(self.screen, r, radius=18)
+        inner_x = r.x + 20
+        inner_w = r.width - 40
+
+        title = self.font_large.render("MÉTRICAS", True, TEXT_COLOR)
+        self.screen.blit(title, (inner_x, r.y + 20))
+
+        # Integración por Simpson 1/3 (reutilizada en varias tarjetas)
+        emissions = self.sustainability_analyzer.calculate_total_emissions()
+
+        y = r.y + 66
+
+        # --- Tarjeta: Integración numérica (Simpson 1/3) ---
+        card = pygame.Rect(inner_x, y, inner_w, 62)
+        pygame.draw.rect(self.screen, (30, 35, 46), card, border_radius=12)
+        pygame.draw.rect(self.screen, HAIRLINE, card, width=1, border_radius=12)
+        self._section_label("UNIDAD III · Integración (Simpson 1/3)", card.x + 14, card.y + 10, ACCENT_CYAN)
+        area = emissions["total_veh_hours"]
+        big = self.font_metric.render(f"{area:.2f}", True, TEXT_COLOR)
+        self.screen.blit(big, (card.x + 14, card.y + 26))
+        unit = self.font_tiny.render("∫ q(t) dt  veh-h", True, TEXT_DIM)
+        self.screen.blit(unit, (card.right - unit.get_width() - 14, card.y + 38))
+        y += 74
+
+        # --- Colas por dirección (barras) ---
+        self._section_label("UNIDAD IV · Colas (Heun)", inner_x, y, ACCENT_PURPLE)
+        y += 20
+        names = ["N-S", "E-O", "S-N", "O-E"]
+        max_q = max(1.0, max(self.engine.queue_state))
         for i, q in enumerate(self.engine.queue_state):
-            text = self.font_tiny.render(f"  q{i}: {q:.2f}", True, (200, 200, 200))
-            self.screen.blit(text, (panel_x + margin, y_pos))
-            y_pos += 18
-        
-        # Newton
-        y_pos += 5
-        text = self.font_tiny.render("Newton-Raphson:", True, (100, 200, 100))
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 18
-        
+            self.screen.blit(self.font_tiny.render(names[i], True, TEXT_DIM), (inner_x, y))
+            bar_bg = pygame.Rect(inner_x + 40, y + 2, inner_w - 90, 9)
+            pygame.draw.rect(self.screen, (38, 43, 54), bar_bg, border_radius=4)
+            fill_w = int((q / max_q) * bar_bg.width)
+            if fill_w > 0:
+                pygame.draw.rect(self.screen, APPROACH_COLORS[i],
+                                 (bar_bg.x, bar_bg.y, fill_w, 9), border_radius=4)
+            vs = self.font_mono.render(f"{q:5.2f}", True, TEXT_COLOR)
+            self.screen.blit(vs, (bar_bg.right + 8, y - 1))
+            y += 22
+        y += 10
+
+        # --- Tarjeta: Newton-Raphson ---
+        card = pygame.Rect(inner_x, y, inner_w, 76)
+        pygame.draw.rect(self.screen, (30, 35, 46), card, border_radius=12)
+        pygame.draw.rect(self.screen, HAIRLINE, card, width=1, border_radius=12)
+        self._section_label("UNIDAD I · Newton-Raphson", card.x + 14, card.y + 10, ACCENT)
         if self.engine.newton_solution is not None:
             sol = self.engine.newton_solution
-            text = self.font_tiny.render(f"x=[{sol[0]:.4f},{sol[1]:.4f}]", True, TEXT_COLOR)
-            self.screen.blit(text, (panel_x + margin, y_pos))
-            y_pos += 18
-        
-        text = self.font_tiny.render(f"Error: {self.engine.newton_residual_norm:.2e}", True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 22
-        
-        # Estado estacionario
-        color = (100, 255, 100) if self.engine.stationary_flag else (255, 100, 100)
-        status = "Sí" if self.engine.stationary_flag else "No"
-        text = self.font_tiny.render(f"Estac.: {status}", True, color)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 22
-        
-        # Vehículos
-        text = self.font_tiny.render(f"Veh. entrada: {sum(self.discrete_counts)}", True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 25
-        
-        # Sostenibilidad
-        text = self.font_small.render("SOSTENIBILIDAD", True, (100, 200, 100))
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 22
-        
-        emissions = self.sustainability_analyzer.calculate_total_emissions()
-        text = self.font_tiny.render(f"CO2: {emissions['total_co2']:.3f} kg", True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 18
-        
-        text = self.font_tiny.render(f"Retraso: {emissions['total_veh_hours']:.3f} vh", True, TEXT_COLOR)
-        self.screen.blit(text, (panel_x + margin, y_pos))
-        y_pos += 18
-        
-        if self.sustainability_analyzer.optimization_applied and self.sustainability_analyzer.baseline_emissions > 1e-9:
+            self._metric_row(card.x + 14, card.y + 30, inner_w - 28, "x",
+                             f"[{sol[0]:.4f}, {sol[1]:.4f}]", TEXT_COLOR)
+        err = self.engine.newton_residual_norm
+        err_color = SUCCESS_COLOR if err < 1e-4 else WARN_COLOR
+        self._metric_row(card.x + 14, card.y + 52, inner_w - 28, "|F(X)|",
+                         f"{err:.2e}", err_color)
+        y += 88
+
+        # --- Tarjeta: Sostenibilidad ---
+        card = pygame.Rect(inner_x, y, inner_w, self.right_panel_rect.bottom - y - 20)
+        card.height = max(100, card.height)
+        pygame.draw.rect(self.screen, (28, 38, 33), card, border_radius=12)
+        pygame.draw.rect(self.screen, (46, 66, 54), card, width=1, border_radius=12)
+        self._section_label("Sostenibilidad Ambiental", card.x + 14, card.y + 10, SUCCESS_COLOR)
+        cy = card.y + 30
+        self._metric_row(card.x + 14, cy, inner_w - 28, "CO2 total",
+                         f"{emissions['total_co2']:.3f} kg", TEXT_COLOR)
+        cy += 22
+        self._metric_row(card.x + 14, cy, inner_w - 28, "Retraso",
+                         f"{emissions['total_veh_hours']:.3f} vh", TEXT_COLOR)
+        cy += 22
+        self._metric_row(card.x + 14, cy, inner_w - 28, "Veh. entrada",
+                         f"{sum(self.discrete_counts)}", ACCENT_CYAN)
+        cy += 26
+        if (self.sustainability_analyzer.optimization_applied
+                and self.sustainability_analyzer.baseline_emissions > 1e-9):
             reduction_pct = (
-                (self.sustainability_analyzer.baseline_emissions - self.sustainability_analyzer.optimized_emissions)
-                / self.sustainability_analyzer.baseline_emissions
-                * 100
-            )
-            color = (50, 200, 50) if reduction_pct > 0 else (255, 100, 100)
-            text = self.font_small.render(f"Reduc: {reduction_pct:.1f}%", True, color)
-            self.screen.blit(text, (panel_x + margin, y_pos))
+                (self.sustainability_analyzer.baseline_emissions
+                 - self.sustainability_analyzer.optimized_emissions)
+                / self.sustainability_analyzer.baseline_emissions * 100)
+            color = SUCCESS_COLOR if reduction_pct > 0 else ERROR_COLOR
+            rt = self.font_large.render(f"-{abs(reduction_pct):.1f}%", True, color)
+            self.screen.blit(rt, (card.x + 14, cy))
+            self.screen.blit(self.font_tiny.render("reducción de", True, TEXT_DIM),
+                             (card.x + 20 + rt.get_width(), cy + 2))
+            self.screen.blit(self.font_tiny.render("contaminación", True, TEXT_DIM),
+                             (card.x + 20 + rt.get_width(), cy + 16))
 
     def draw_intersection(self) -> None:
-        """Dibuja la intersección vial en el área central."""
-        center_start_y = 0
-        center_end_x = self.width - self.right_panel_width
-        
-        # Fondo
-        pygame.draw.rect(self.screen, BACKGROUND_COLOR, 
-                        (self.center_start_x, center_start_y, self.center_width, self.height))
-        
-        # Calcular centro del área de visualización
-        center_x = self.center_start_x + self.center_width // 2
-        center_y = self.height // 2
-        
-        # Carreteras
-        pygame.draw.rect(
-            self.screen,
-            ROAD_COLOR,
-            (self.center_start_x, center_y - ROAD_WIDTH // 2, self.center_width, ROAD_WIDTH),
-        )
+        """Dibuja la intersección vial moderna en el área central."""
+        cx = self.center_start_x + self.center_width // 2
+        cy = self.height // 2
+        vis_rect = pygame.Rect(self.center_start_x, self.margin,
+                               self.center_width, self.height - 2 * self.margin)
 
-        pygame.draw.rect(
-            self.screen,
-            ROAD_COLOR,
-            (center_x - ROAD_WIDTH // 2, center_start_y, ROAD_WIDTH, self.height),
-        )
+        # Panel base de la escena
+        glass_panel(self.screen, vis_rect, radius=18, fill=(12, 15, 21), alpha=255)
+        self.screen.set_clip(vis_rect.inflate(-2, -2))
 
-        # Líneas divisorias
-        for x in range(int(self.center_start_x), int(center_end_x), 120):
-            pygame.draw.rect(self.screen, LANE_COLOR, (x, center_y - 4, 60, 8))
+        half = ROAD_WIDTH // 2
+        # Asfalto horizontal y vertical con degradado
+        h_road = vertical_gradient(vis_rect.width, ROAD_WIDTH, ROAD_TOP, ROAD_BOTTOM)
+        self.screen.blit(h_road, (vis_rect.x, cy - half))
+        v_road = vertical_gradient(ROAD_WIDTH, vis_rect.height, ROAD_TOP, ROAD_BOTTOM)
+        self.screen.blit(v_road, (cx - half, vis_rect.y))
 
-        for y in range(0, self.height, 120):
-            pygame.draw.rect(self.screen, LANE_COLOR, (center_x - 4, y, 8, 60))
+        # Bordes de carril (líneas continuas)
+        for edge in (cy - half, cy + half):
+            pygame.draw.line(self.screen, (70, 76, 88), (vis_rect.x, edge), (vis_rect.right, edge), 2)
+        for edge in (cx - half, cx + half):
+            pygame.draw.line(self.screen, (70, 76, 88), (edge, vis_rect.y), (edge, vis_rect.bottom), 2)
 
-        # Centro
-        pygame.draw.rect(
-            self.screen,
-            CENTER_COLOR,
-            (center_x - 30, center_y - 30, 60, 60),
-        )
+        # Líneas divisorias centrales discontinuas (evitando el cruce)
+        for x in range(vis_rect.x, vis_rect.right, 46):
+            if x < cx - half - 10 or x > cx + half:
+                pygame.draw.rect(self.screen, LANE_COLOR, (x, cy - 2, 24, 4), border_radius=2)
+        for y in range(vis_rect.y, vis_rect.bottom, 46):
+            if y < cy - half - 10 or y > cy + half:
+                pygame.draw.rect(self.screen, LANE_COLOR, (cx - 2, y, 4, 24), border_radius=2)
+
+        # Cruces peatonales (stripes) en las 4 bocas
+        stripe = (150, 158, 172)
+        for i in range(-half + 8, half - 6, 14):
+            pygame.draw.rect(self.screen, stripe, (cx + i, cy - half - 22, 8, 16), border_radius=2)
+            pygame.draw.rect(self.screen, stripe, (cx + i, cy + half + 6, 8, 16), border_radius=2)
+            pygame.draw.rect(self.screen, stripe, (cx - half - 22, cy + i, 16, 8), border_radius=2)
+            pygame.draw.rect(self.screen, stripe, (cx + half + 6, cy + i, 16, 8), border_radius=2)
+
+        # Núcleo central con glow
+        draw_glow(self.screen, (cx, cy), 70, CENTER_COLOR, layers=6, max_alpha=45)
+        core = pygame.Rect(cx - 34, cy - 34, 68, 68)
+        pygame.draw.rect(self.screen, CENTER_COLOR, core, border_radius=14)
+        pygame.draw.rect(self.screen, (255, 226, 150), core, width=2, border_radius=14)
+        pygame.draw.circle(self.screen, (60, 45, 10), core.center, 9, 3)
+
+        self.screen.set_clip(None)
+
+        # Título flotante de la escena
+        scene_title = self.font_semibold.render("SMART INTERSECTION", True, TEXT_DIM)
+        self.screen.blit(scene_title, (vis_rect.x + 20, vis_rect.y + 16))
+        light_lbl = "N-S VERDE" if self.light_state.startswith("green_ns") or self.light_state == "red_ew" else "E-O VERDE"
+        # fase activa
+        phase = "N-S" if self.light_state in ("green_ns",) else ("E-O" if self.light_state == "green_ew" else "TRANSICIÓN")
+        pc = SUCCESS_COLOR if self.light_state.startswith("green") else WARN_COLOR
+        ps = self.font_tiny.render(f"FASE: {phase}", True, pc)
+        self.screen.blit(ps, (vis_rect.right - ps.get_width() - 20, vis_rect.y + 18))
 
     def draw_traffic_lights(self) -> None:
-        """Dibuja los semáforos."""
-        center_x = self.center_start_x + self.center_width // 2
-        center_y = self.height // 2
-        
+        """Dibuja los semáforos modernos con housing y glow."""
+        cx = self.center_start_x + self.center_width // 2
+        cy = self.height // 2
+        pulse = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() * 0.006)
+
         light_positions = [
-            (center_x + 80, center_y - 150),
-            (center_x - 150, center_y - 80),
-            (center_x - 80, center_y + 150),
-            (center_x + 150, center_y + 80),
+            (cx + 92, cy - 96),
+            (cx - 96, cy - 92),
+            (cx - 92, cy + 96),
+            (cx + 96, cy + 92),
         ]
 
         for idx, (x, y) in enumerate(light_positions):
@@ -462,31 +930,80 @@ class TrafficSimulationFrontend:
                 is_green = self.light_state in ("green_ew", "yellow_ew")
 
             color = TRAFFIC_LIGHT_GREEN if is_green else TRAFFIC_LIGHT_RED
-            pygame.draw.circle(self.screen, color, (int(x), int(y)), 15)
-            pygame.draw.circle(self.screen, TEXT_COLOR, (int(x), int(y)), 15, 2)
+
+            # Housing
+            housing = pygame.Rect(0, 0, 26, 26)
+            housing.center = (int(x), int(y))
+            pygame.draw.rect(self.screen, (18, 20, 26), housing, border_radius=8)
+            pygame.draw.rect(self.screen, (60, 66, 78), housing, width=1, border_radius=8)
+
+            # Lámpara con glow pulsante
+            glow_r = 20 + int(6 * pulse)
+            draw_glow(self.screen, (x, y), glow_r, color, layers=6, max_alpha=110)
+            pygame.draw.circle(self.screen, color, (int(x), int(y)), 9)
+            pygame.draw.circle(self.screen, (255, 255, 255), (int(x - 2), int(y - 2)), 2)
+
+    def _draw_vehicle(self, cx: float, cy: float, horizontal: bool, color: tuple,
+                      lead: tuple) -> None:
+        """Dibuja un vehículo estilizado (rounded, gradient, faros)."""
+        if horizontal:
+            w, h = 28, 17
+        else:
+            w, h = 17, 28
+        rect = pygame.Rect(0, 0, w, h)
+        rect.center = (int(cx), int(cy))
+
+        # Sombra
+        shadow = pygame.Surface((w + 6, h + 6), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow, (0, 0, 0, 90), shadow.get_rect())
+        self.screen.blit(shadow, (rect.x - 3, rect.y + 2))
+
+        # Cuerpo con degradado
+        top = tuple(min(255, c + 45) for c in color)
+        bottom = tuple(max(0, c - 35) for c in color)
+        grad = vertical_gradient(w, h, top, bottom)
+        mask = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=5)
+        body = grad.copy()
+        body.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        self.screen.blit(body, rect.topleft)
+        pygame.draw.rect(self.screen, (255, 255, 255, 60), rect, width=1, border_radius=5)
+
+        # Parabrisas (franja translúcida)
+        if horizontal:
+            wind = pygame.Rect(rect.centerx - 3, rect.y + 3, 6, h - 6)
+        else:
+            wind = pygame.Rect(rect.x + 3, rect.centery - 3, w - 6, 6)
+        ws = pygame.Surface((wind.width, wind.height), pygame.SRCALPHA)
+        pygame.draw.rect(ws, (200, 230, 255, 90), ws.get_rect(), border_radius=3)
+        self.screen.blit(ws, wind.topleft)
+
+        # Faros en el borde delantero (hacia el centro)
+        ldx, ldy = lead
+        fx = rect.centerx + ldx * (w // 2 - 2)
+        fy = rect.centery + ldy * (h // 2 - 2)
+        if horizontal:
+            offsets = [(0, -4), (0, 4)]
+        else:
+            offsets = [(-4, 0), (4, 0)]
+        for ox, oy in offsets:
+            pygame.draw.circle(self.screen, (255, 240, 190), (int(fx + ox), int(fy + oy)), 2)
 
     def draw_vehicle_queues(self) -> None:
-        """Dibuja vehículos en fila."""
-        center_x = self.center_start_x + self.center_width // 2
-        center_y = self.height // 2
-        
-        queue_start_positions = [
-            (center_x + 50, center_y - 120, 0, -1),
-            (center_x - 120, center_y - 50, -1, 0),
-            (center_x - 50, center_y + 120, 0, 1),
-            (center_x + 120, center_y + 50, 1, 0),
-        ]
+        """Dibuja los vehículos animados en sus posiciones actuales."""
+        cx = self.center_start_x + self.center_width // 2
+        cy = self.height // 2
+        vis_rect = pygame.Rect(self.center_start_x, self.margin,
+                               self.center_width, self.height - 2 * self.margin)
+        self.screen.set_clip(vis_rect.inflate(-2, -2))
 
-        for idx, (x, y, dx, dy) in enumerate(queue_start_positions):
-            queue_length = int(self.engine.queue_state[idx])
-            for vehicle_idx in range(queue_length):
-                vehicle_x = x + dx * vehicle_idx * 30
-                vehicle_y = y + dy * vehicle_idx * 30
-                pygame.draw.rect(
-                    self.screen,
-                    VEHICLE_QUEUE_COLOR,
-                    (int(vehicle_x) - 12, int(vehicle_y) - 8, 24, 16),
-                )
+        for idx, cars in enumerate(self.vehicles):
+            horizontal = idx in (1, 3)
+            lead = self._lane_lead(idx)
+            for car in cars:
+                x, y = self._lane_to_screen(idx, cx, cy, car["p"])
+                self._draw_vehicle(x, y, horizontal, APPROACH_COLORS[idx], lead)
+        self.screen.set_clip(None)
 
     def handle_events(self) -> None:
         """Maneja eventos de entrada del usuario."""
@@ -494,7 +1011,8 @@ class TrafficSimulationFrontend:
         mouse_pressed = pygame.mouse.get_pressed()[0]
 
         self.optimize_button.update(mouse_pos)
-        self.report_button.update(mouse_pos)
+        self.export_button.update(mouse_pos)
+        self.help_button.update(mouse_pos)
         self.green_ns_slider.update(mouse_pos, mouse_pressed)
         self.green_ew_slider.update(mouse_pos, mouse_pressed)
 
@@ -506,55 +1024,108 @@ class TrafficSimulationFrontend:
                 self.height = max(MIN_HEIGHT, event.size[1])
                 self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
                 self.update_layout()
+            # --- Modal de ayuda: intercepta eventos mientras está visible ---
+            elif self.help_overlay.visible and event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_h):
+                    self.help_overlay.visible = False
+                elif event.key in (pygame.K_RIGHT, pygame.K_DOWN):
+                    self.help_overlay.next()
+                elif event.key in (pygame.K_LEFT, pygame.K_UP):
+                    self.help_overlay.prev()
+            elif self.help_overlay.visible and event.type == pygame.MOUSEBUTTONDOWN:
+                self.help_overlay.handle_click(mouse_pos)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
-                elif event.key == pygame.K_1:
-                    self.discrete_counts[0] += 2
-                elif event.key == pygame.K_2:
-                    self.discrete_counts[1] += 2
-                elif event.key == pygame.K_3:
-                    self.discrete_counts[2] += 2
-                elif event.key == pygame.K_4:
-                    self.discrete_counts[3] += 2
+                elif event.key == pygame.K_h:
+                    self.help_overlay.toggle()
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
+                    lane = event.key - pygame.K_1
+                    self.discrete_counts[lane] += 2
+                    self.pending_spawns[lane] += 2
                 elif event.key == pygame.K_r:
                     self.discrete_counts = [0, 0, 0, 0]
                     self.engine = TrafficSimulationEngine(h=0.016)
                     self.sustainability_analyzer.reset()
+                    self.vehicles = [[], [], [], []]
+                    self.pending_spawns = [0, 0, 0, 0]
+                    self.spawn_timers = [0.0, 0.0, 0.0, 0.0]
+                    self.spawn_probabilities = self._make_traffic_pattern()
+                    self.spawn_probability = max(self.spawn_probabilities)
                     self.baseline_set = False
-                    self.report_generated = False
+                    self.set_status("Simulación reiniciada", ACCENT_CYAN)
                 elif event.key == pygame.K_o:
                     self.optimize_traffic_signals()
-                elif event.key == pygame.K_g:
-                    self.generate_sustainability_report()
-                elif event.key == pygame.K_s:
-                    self.save_report()
                 elif event.key == pygame.K_e:
-                    self.export_csv()
-                elif event.key == pygame.K_SPACE:
-                    self.show_report = not self.show_report
-                    if self.show_report:
-                        self.set_status("Reporte mostrado (ESPACIO para ocultar)", SUCCESS_COLOR)
+                    self.export_excel()
+                elif event.key == pygame.K_m:
+                    if self.music is not None:
+                        if self.music_on:
+                            self.music.stop()
+                        else:
+                            self.music.play(loops=-1)
+                        self.music_on = not self.music_on
+                        self.set_status(
+                            f"Música: {'ON' if self.music_on else 'OFF'}", ACCENT_CYAN)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if self.optimize_button.is_clicked(mouse_pos, True):
                     self.optimize_traffic_signals()
                     self.optimize_button.active = True
-                elif self.report_button.is_clicked(mouse_pos, True):
-                    self.generate_sustainability_report()
-                    self.report_button.active = True
+                elif self.export_button.is_clicked(mouse_pos, True):
+                    self.export_excel()
+                    self.export_button.active = True
+                elif self.help_button.is_clicked(mouse_pos, True):
+                    self.help_overlay.toggle()
+                    self.help_button.active = True
             elif event.type == pygame.MOUSEBUTTONUP:
                 self.optimize_button.active = False
-                self.report_button.active = False
+                self.export_button.active = False
+                self.help_button.active = False
 
         self.green_time_ns = self.green_ns_slider.value
         self.green_time_ew = self.green_ew_slider.value
 
-    def generate_sustainability_report(self) -> None:
-        """Genera un reporte de sostenibilidad ambiental en la terminal."""
-        if not self.report_generated:
-            report = self.sustainability_analyzer.generate_sustainability_report()
-            print(report)
-            self.report_generated = True
+    def set_status(self, message: str, color: tuple[int, int, int] = SUCCESS_COLOR) -> None:
+        """Muestra un mensaje de estado temporal en pantalla."""
+        self.status_message = message
+        self.status_color = color
+        self.status_timer = 3.0
+
+    def export_excel(self) -> None:
+        """Exporta el reporte de sostenibilidad a un archivo Excel (.xlsx) con gráficos."""
+        if not self.sustainability_analyzer.time_history:
+            self.set_status("Sin datos aún — spawnea tráfico primero", WARN_COLOR)
+            return
+        try:
+            filepath = self.sustainability_analyzer.export_to_excel()
+            print(f"[INFO] Excel generado: {filepath}")
+            self.set_status(f"Excel exportado: {os.path.basename(filepath)}", SUCCESS_COLOR)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.set_status("Error al exportar Excel", ERROR_COLOR)
+
+    def draw_status_message(self) -> None:
+        """Dibuja un toast de estado temporal en la parte inferior central."""
+        if self.status_timer <= 0 or not self.status_message:
+            return
+        alpha = min(1.0, self.status_timer / 0.6)
+        text_surf = self.font_small.render(self.status_message, True, self.status_color)
+        pad_x, pad_y = 18, 10
+        w = text_surf.get_width() + 2 * pad_x + 16
+        h = text_surf.get_height() + 2 * pad_y
+        toast = pygame.Rect(0, 0, w, h)
+        toast.centerx = self.center_start_x + self.center_width // 2
+        toast.bottom = self.height - 30
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (18, 22, 30, int(235 * alpha)), surf.get_rect(), border_radius=12)
+        pygame.draw.rect(surf, (*self.status_color, int(200 * alpha)), surf.get_rect(),
+                         width=1, border_radius=12)
+        surf.set_alpha(int(255 * alpha))
+        self.screen.blit(surf, toast.topleft)
+        pygame.draw.circle(self.screen, self.status_color,
+                           (toast.x + pad_x, toast.centery), 4)
+        self.screen.blit(text_surf, (toast.x + pad_x + 12, toast.y + pad_y))
 
     def run(self) -> None:
         """Bucle principal de la simulación."""
@@ -564,22 +1135,34 @@ class TrafficSimulationFrontend:
             self.handle_events()
             self.spawn_vehicles(dt)
             self.update_traffic_light(dt)
+            self.update_vehicles(dt)
 
-            self.engine.step(discrete_counts=self.discrete_counts)
+            # Máscara de verde por dirección [N-S, E-O, S-N, O-E] — acopla semáforo y colas
+            green_mask = [
+                self.light_state == "green_ns",
+                self.light_state == "green_ew",
+                self.light_state == "green_ns",
+                self.light_state == "green_ew",
+            ]
+            self.engine.step(discrete_counts=self.discrete_counts, green_mask=green_mask)
 
             self.sustainability_analyzer.record_state(self.engine.current_time, self.engine.queue_state)
 
-            if self.engine.stationary_flag and not self.baseline_set:
-                self.sustainability_analyzer.set_baseline()
-                self.baseline_set = True
-                print("\n[INFO] Estado estacionario detectado. Línea base establecida para análisis de sostenibilidad.\n")
+            if self.status_timer > 0:
+                self.status_timer -= dt
 
             # Dibujar todo
+            self._draw_background()
             self.draw_intersection()
             self.draw_traffic_lights()
             self.draw_vehicle_queues()
             self.draw_left_panel()
             self.draw_right_panel()
+            self.draw_status_message()
+            self.help_overlay.draw(self.screen, {
+                "title": self.font_large, "section": self.font_semibold,
+                "body": self.font_small, "mono": self.font_mono, "tiny": self.font_tiny,
+            }, self.width, self.height)
 
             pygame.display.flip()
             self.clock.tick(60)

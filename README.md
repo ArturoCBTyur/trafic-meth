@@ -43,7 +43,35 @@ Un simulador dinámico de tráfico en 2D que integra tres unidades de métodos n
 - **Activación**: Automática cuando se detecta estado estacionario (Diferenciación Numérica)
 - **Reporte**: Generado en terminal al presionar `G` o hacer clic en "Generar Reporte"
 
-## Instalación
+## Ejecutables (sin instalar nada)
+
+El proyecto entrega binarios **autocontenidos** para cada sistema operativo — no
+requieren Python ni dependencias, solo descargar y ejecutar.
+
+### Descargar (recomendado)
+En la pestaña **Releases** de GitHub hay un binario por plataforma (generados
+automáticamente por GitHub Actions en runners nativos):
+
+| Sistema | Archivo | Cómo correr |
+|---------|---------|-------------|
+| Windows | `SmartIntersection-windows.exe` | doble clic |
+| macOS   | `SmartIntersection-macos` | `chmod +x` y abrir (o `./SmartIntersection-macos`) |
+| Linux   | `SmartIntersection-linux` | `chmod +x` y `./SmartIntersection-linux` |
+
+### Construir el ejecutable localmente
+PyInstaller **no** hace cross-compilación: cada binario se construye en su propio SO.
+
+- **Linux / macOS**: `./build.sh`
+- **Windows**: `build.bat`
+
+Salida: `dist/SmartIntersection` (o `.exe`). El `.spec` (`trafic_meth.spec`) es la
+fuente de verdad de la configuración de empaquetado; el workflow
+`.github/workflows/build.yml` compila los 3 SO y adjunta los binarios a la Release
+al publicar un tag `vX.Y.Z`.
+
+---
+
+## Instalación (para desarrollo / desde código)
 
 1. **Clonar o descargar el repositorio**:
    ```bash

@@ -4,26 +4,34 @@ from __future__ import annotations
 
 import numpy as np
 
-from numerical_engine import TrafficSimulationEngine
+from numerical_engine import TrafficSimulationEngine, composite_simpson
 
 
-def test_arrival_rate_derivative() -> None:
-    """Prueba la diferenciación numérica."""
+def test_simpson_integration() -> None:
+    """Prueba la integración numérica por Regla de Simpson 1/3 compuesta."""
     print("=" * 60)
-    print("TEST 1: DIFERENCIACIÓN NUMÉRICA (UNIDAD III)")
+    print("TEST 1: INTEGRACIÓN NUMÉRICA - SIMPSON 1/3 (UNIDAD III)")
     print("=" * 60)
 
     engine = TrafficSimulationEngine(h=0.1)
 
-    counts = [0, 5, 10, 15, 12]
-    times = [0.0, 0.1, 0.2, 0.3, 0.4]
+    # Caso 1: integrar x^2 en [0,2], exacto = 8/3 ≈ 2.6667 (Simpson es exacto en cúbicas)
+    h = 0.5
+    xs = [0.0, 0.5, 1.0, 1.5, 2.0]           # 4 intervalos (par)
+    ys = [x * x for x in xs]
+    area_even = composite_simpson(ys, h)
+    print(f"∫x² dx en [0,2] (4 intervalos, par): {area_even:.4f}  (exacto 2.6667)")
 
-    derivative, stationary = engine.estimate_arrival_rate_derivative(counts, times)
+    # Caso 2: número IMPAR de intervalos (Trapecio en el último tramo)
+    xs_odd = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]  # 5 intervalos (impar)
+    ys_odd = [x * x for x in xs_odd]
+    area_odd = composite_simpson(ys_odd, h)
+    print(f"∫x² dx en [0,2.5] (5 intervalos, impar→trapecio final): {area_odd:.4f}")
 
-    print(f"Historiales de conteo: {counts}")
-    print(f"Tiempos: {times}")
-    print(f"Derivada estimada: {derivative:.4f} veh/s")
-    print(f"Estado estacionario: {stationary}")
+    # Caso 3: vía el motor con q(t) tipo cola de vehículos
+    q_list = [0.0, 2.0, 4.0, 3.0, 1.0]
+    area_q = engine.integrate_simpson(q_list, h=0.1)
+    print(f"Área bajo q(t)={q_list} con h=0.1: {area_q:.4f} veh-h")
     print()
 
 
@@ -93,8 +101,7 @@ def test_full_integration() -> None:
               f"Colas={[f'{q:.3f}' for q in result['queues']]}")
 
     print(f"\nEstado final de colas: {engine.queue_state}")
-    print(f"Derivada instantánea: {engine.arrival_rate_derivative:.4f}")
-    print(f"Bandera de estacionariedad: {engine.stationary_flag}")
+    print(f"Flujos finales: {engine.flow_state}")
     print()
 
 
@@ -108,7 +115,7 @@ def main() -> None:
     print("╚" + "═" * 58 + "╝")
     print()
 
-    test_arrival_rate_derivative()
+    test_simpson_integration()
     test_newton_raphson()
     test_heun_method()
     test_full_integration()
