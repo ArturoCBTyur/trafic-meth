@@ -64,7 +64,6 @@ class TrafficSimulationEngine:
 
     def __init__(self, h: float = 0.1) -> None:
         self.h = h
-        self.flow_state = [0.0, 0.0, 0.0, 0.0]
         self.queue_state = [0.0, 0.0, 0.0, 0.0]
         self.discrete_vehicle_counts = [0, 0, 0, 0]
 
@@ -75,93 +74,6 @@ class TrafficSimulationEngine:
     def integrate_simpson(self, q_list: list[float], h: float | None = None) -> float:
         """Unidad III: área bajo q(t) por Simpson 1/3 compuesta (ver composite_simpson)."""
         return composite_simpson(q_list, self.h if h is None else h)
-
-    def nonlinear_flow_residuals(
-        self,
-        x: np.ndarray | list[float],
-        parameters: tuple[float, float, float, float] | None = None,
-    ) -> np.ndarray:
-        """Modelo de equilibrio de flujos concurrentes mediante saturación no lineal.
-
-        Se considera un vector de incógnitas X = [x1, x2], donde x1 representa el flujo
-        dominante de una dirección y x2 el flujo concurrente de la perpendicular. Para modelar
-        la congestión se utiliza una forma exponencial tipo Greenshields en la que el flujo
-        crece hacia una saturación asintótica cuando el conflicto aumenta.
-
-        Las ecuaciones no lineales son:
-
-        F1(X) = x1 - a(1 - e^{-x2 / c}) - b1
-        F2(X) = x2 - d(1 - e^{-x1 / e}) - b2
-
-        donde los términos de saturación capturan el efecto de choque entre flujos.
-        """
-        x_array = np.asarray(x, dtype=float)
-        if x_array.shape != (2,):
-            raise ValueError("El vector de incógnitas debe tener exactamente dos componentes.")
-
-        if parameters is None:
-            a, b1, d, b2 = 0.85, 0.15, 0.75, 0.10
-            c, e = 2.0, 3.0
-        else:
-            a, b1, d, b2, c, e = (*parameters, 2.0, 3.0)
-
-        x1, x2 = x_array
-        f1 = x1 - a * (1.0 - np.exp(-x2 / c)) - b1
-        f2 = x2 - d * (1.0 - np.exp(-x1 / e)) - b2
-        return np.array([f1, f2], dtype=float)
-
-    def solve_newton_raphson(
-        self,
-        initial_guess: np.ndarray | list[float],
-        tol: float = 1e-8,
-        max_iter: int = 50,
-        parameters: tuple[float, float, float, float] | None = None,
-    ) -> dict[str, object]:
-        """Resuelve F(X)=0 mediante Newton-Raphson con Jacobiana numérica.
-
-        El método iterativo sigue la forma:
-
-        J(X_k) ΔX = -F(X_k)
-        X_{k+1} = X_k + ΔX
-
-        donde la matriz Jacobiana se aproxima numéricamente por diferencias finitas hacia
-        adelante para cada variable del sistema, sin requerir derivadas analíticas explícitas.
-        """
-        x = np.asarray(initial_guess, dtype=float)
-        if x.shape != (2,):
-            raise ValueError("La aproximación inicial debe ser un vector de dos componentes.")
-
-        converged = False
-        for k in range(max_iter):
-            f_value = self.nonlinear_flow_residuals(x, parameters)
-            residual_norm = float(np.linalg.norm(f_value))
-            if residual_norm < tol:
-                converged = True
-                break
-
-            jacobian = np.zeros((2, 2), dtype=float)
-            for j in range(2):
-                epsilon = 1e-6 * (1.0 + abs(x[j]))
-                x_perturbed = x.copy()
-                x_perturbed[j] += epsilon
-                f_perturbed = self.nonlinear_flow_residuals(x_perturbed, parameters)
-                jacobian[:, j] = (f_perturbed - f_value) / epsilon
-
-            delta_x = np.linalg.solve(jacobian, -f_value)
-            x = x + delta_x
-
-            if np.linalg.norm(delta_x) < tol:
-                converged = True
-                break
-
-        self.newton_solution = x
-        self.newton_residual_norm = float(np.linalg.norm(self.nonlinear_flow_residuals(x, parameters)))
-        return {
-            "solution": x,
-            "residual": self.nonlinear_flow_residuals(x, parameters),
-            "residual_norm": self.newton_residual_norm,
-            "converged": converged,
-        }
 
     def queue_rhs(
         self,
@@ -217,25 +129,6 @@ class TrafficSimulationEngine:
         q_next = q_previous + 0.5 * h * (f0 + f1)
         return max(0.0, q_next)
 
-    def integrate_queue(
-        self,
-        q0: float,
-        total_time: float,
-        h: float,
-        entry_rate: float | Callable[[float], float],
-        exit_rate: float | Callable[[float], float],
-    ) -> tuple[list[float], list[float]]:
-        """Integra la EDO de la cola sobre un intervalo de tiempo usando Heun."""
-        n_steps = int(total_time / h)
-        times = [i * h for i in range(n_steps + 1)]
-        q_values = [float(q0)]
-
-        for i in range(n_steps):
-            q_next = self.heun_queue_update(q_values[-1], times[i], h, entry_rate, exit_rate)
-            q_values.append(float(q_next))
-
-        return times, q_values
-
     # Parámetros físicos del modelo de cola por dirección
     SATURATION_FLOW = 0.9      # veh/s que salen cuando el semáforo está en verde
     ARRIVAL_SCALE = 0.02       # conversión de conteo de sensor a tasa de llegada
@@ -260,11 +153,6 @@ class TrafficSimulationEngine:
         if discrete_counts is not None:
             self.discrete_vehicle_counts = [max(0, c) for c in discrete_counts]
 
-        self.flow_state = [
-            max(0.0, flow + 0.01 * count)
-            for flow, count in zip(self.flow_state, self.discrete_vehicle_counts)
-        ]
-
         for index, queue_value in enumerate(self.queue_state):
             # Tasa de llegada acotada (proporcional a la demanda detectada)
             arrival_rate = min(
@@ -283,7 +171,7 @@ class TrafficSimulationEngine:
             )
 
         self.current_time += dt
-        return {"flows": self.flow_state, "queues": self.queue_state}
+        return {"queues": self.queue_state}
 
     # ------------------------------------------------------------------
     # OPTIMIZACIÓN DE SEMÁFOROS (acopla Unidad I + III + IV)
@@ -392,124 +280,95 @@ class TrafficSimulationEngine:
         exit_ew = lambda t: sat if ew_green(t) else 0.0
 
         q_ns, q_ew, t = 0.0, 0.0, 0.0
-        veh_hours = 0.0
+        times = [0.0]
+        traj_ns = [0.0]
+        traj_ew = [0.0]
         n_steps = int(horizon / h)
         for _ in range(n_steps):
-            new_ns = self.heun_queue_update(q_ns, t, h, lambda_ns, exit_ns)
-            new_ew = self.heun_queue_update(q_ew, t, h, lambda_ew, exit_ew)
-            total_prev = q_ns + q_ew
-            total_new = new_ns + new_ew
-            veh_hours += 0.5 * (total_prev + total_new) * h
-            q_ns, q_ew, t = new_ns, new_ew, t + h
+            q_ns = self.heun_queue_update(q_ns, t, h, lambda_ns, exit_ns)
+            q_ew = self.heun_queue_update(q_ew, t, h, lambda_ew, exit_ew)
+            t += h
+            times.append(t)
+            traj_ns.append(q_ns)
+            traj_ew.append(q_ew)
+
+        # Unidad III: el área bajo cada cola se integra con Simpson 1/3 compuesta.
+        vh_ns = composite_simpson(traj_ns, h)
+        vh_ew = composite_simpson(traj_ew, h)
+        veh_hours = vh_ns + vh_ew
 
         return {
             "co2": veh_hours * co2_idle_rate,
             "veh_hours": veh_hours,
-            "q_ns_final": q_ns,
-            "q_ew_final": q_ew,
+            "vh_ns": vh_ns,
+            "vh_ew": vh_ew,
+            "co2_ns": vh_ns * co2_idle_rate,
+            "co2_ew": vh_ew * co2_idle_rate,
+            "times": times,
+            "q_ns": traj_ns,
+            "q_ew": traj_ew,
         }
 
 
 class SustainabilityAnalyzer:
-    """Analizador de Responsabilidad Social y Sostenibilidad Ambiental.
+    """Analizador de sostenibilidad basado en UNA sola fuente de verdad.
 
-    Esta clase evalúa el impacto ambiental del tráfico en la intersección mediante:
-    1. Integración temporal de colas para obtener Horas-Vehículo de retraso.
-    2. Estimación de emisiones de CO2 por ralentí vehicular.
-    3. Generación de reportes comparativos pre/post-optimización.
+    Todas las cifras reportadas (CO2, retraso, desglose, reducción y el reporte Excel)
+    provienen de la MISMA proyección: engine.project_emissions() bajo la demanda medida,
+    que corre Heun e integra con Simpson 1/3. Así el número mostrado en pantalla y el
+    porcentaje de reducción son siempre coherentes entre sí.
+
+    El estado "actual" (self.current) es la proyección del plan aplicado; baseline y
+    optimized son proyecciones del reparto equitativo y del reparto Newton sobre la
+    misma demanda y horizonte.
     """
 
+    DIRECTIONS = ["N-S", "E-O", "S-N", "O-E"]
+
     def __init__(self, co2_idle_rate: float = 0.12) -> None:
-        """Inicializa el analizador de sostenibilidad.
-
-        Args:
-            co2_idle_rate: Tasa de emisión de CO2 en kg/hora cuando el motor está encendido
-                          en ralentí. Valor típico para autos: 0.12 kg CO2/hora.
-        """
         self.co2_idle_rate = co2_idle_rate
-
-        self.time_history: list[float] = []
-        self.queue_history: list[list[float]] = []
-        self.vehicle_hours_delay: list[float] = [0.0, 0.0, 0.0, 0.0]
-        self.cumulative_co2_emissions: list[float] = [0.0, 0.0, 0.0, 0.0]
-
+        self.current: dict | None = None          # proyección del plan aplicado
+        self.demand: tuple[float, float] = (0.0, 0.0)
         self.baseline_emissions = 0.0
         self.optimized_emissions = 0.0
         self.optimization_applied = False
 
-    def record_state(self, time: float, queue_state: list[float]) -> None:
-        """Registra el estado de las colas q_i(t) en un instante de tiempo.
+    def set_current(self, projection: dict, demand: tuple[float, float] | None = None) -> None:
+        """Registra la proyección del plan actualmente aplicado (fuente de verdad)."""
+        self.current = projection
+        if demand is not None:
+            self.demand = demand
 
-        Solo almacena el historial; la integral (Horas-Vehículo y CO2) se calcula bajo
-        demanda con la Regla de Simpson 1/3 compuesta en calculate_total_emissions().
-        """
-        self.time_history.append(float(time))
-        self.queue_history.append([float(q) for q in queue_state])
-
-    def _integrate_queues_simpson(self) -> None:
-        """Recalcula el área bajo q_i(t) por dirección con Simpson 1/3 compuesta.
-
-        Rellena vehicle_hours_delay[i] = ∫ q_i dt y cumulative_co2_emissions[i] = área·tasa.
-        """
-        self.vehicle_hours_delay = [0.0, 0.0, 0.0, 0.0]
-        self.cumulative_co2_emissions = [0.0, 0.0, 0.0, 0.0]
-        n = len(self.time_history)
-        if n < 2:
-            return
-        # Paso uniforme (los frames se registran con dt constante)
-        h = (self.time_history[-1] - self.time_history[0]) / (n - 1)
-        for i in range(4):
-            column = [row[i] for row in self.queue_history]
-            area = composite_simpson(column, h)
-            self.vehicle_hours_delay[i] = float(area)
-            self.cumulative_co2_emissions[i] = float(area * self.co2_idle_rate)
+    def _per_direction(self) -> tuple[list[float], list[float]]:
+        """Reparte el veh-h/CO2 por eje a las 4 direcciones (mitad a cada aproximación)."""
+        if not self.current:
+            return [0.0] * 4, [0.0] * 4
+        vh_ns, vh_ew = self.current["vh_ns"] / 2, self.current["vh_ew"] / 2
+        vh = [vh_ns, vh_ew, vh_ns, vh_ew]                     # N-S, E-O, S-N, O-E
+        co2 = [v * self.co2_idle_rate for v in vh]
+        return vh, co2
 
     def calculate_total_emissions(self) -> dict[str, float]:
-        """Calcula las emisiones totales y métricas de sostenibilidad.
-
-        Integra q(t) con la Regla de Simpson 1/3 compuesta (Unidad III) para obtener el
-        área bajo la curva → Horas-Vehículo → CO2.
-
-        Retorna un diccionario con:
-        - total_co2: Emisiones totales de CO2 (kg)
-        - total_veh_hours: Total de Horas-Vehículo de retraso (área bajo q(t))
-        - average_queue_time: Tiempo promedio de espera
-        - emissions_per_vehicle: Emisiones promedio por vehículo
-        """
-        self._integrate_queues_simpson()
-        total_co2 = float(sum(self.cumulative_co2_emissions))
-        total_veh_hours = float(sum(self.vehicle_hours_delay))
-        total_vehicles = total_veh_hours if total_veh_hours > 0 else 1
-        emissions_per_vehicle = total_co2 / total_vehicles if total_vehicles > 0 else 0.0
-
+        """Métricas totales tomadas de la proyección actual (única fuente)."""
+        if not self.current:
+            return {"total_co2": 0.0, "total_veh_hours": 0.0,
+                    "average_queue_time": 0.0, "emissions_per_vehicle": 0.0}
+        total_co2 = float(self.current["co2"])
+        total_vh = float(self.current["veh_hours"])
         return {
             "total_co2": total_co2,
-            "total_veh_hours": total_veh_hours,
-            "average_queue_time": float(np.mean(self.vehicle_hours_delay)) if len(self.vehicle_hours_delay) > 0 else 0.0,
-            "emissions_per_vehicle": emissions_per_vehicle,
+            "total_veh_hours": total_vh,
+            "average_queue_time": total_vh / 4.0,
+            "emissions_per_vehicle": total_co2 / total_vh if total_vh > 0 else 0.0,
         }
 
-    def set_baseline(self, co2_value: float | None = None) -> None:
-        """Fija la línea base (plan manual).
+    def set_baseline(self, co2_value: float) -> None:
+        """Fija la línea base = proyección del plan equitativo (misma demanda/horizonte)."""
+        self.baseline_emissions = float(co2_value)
 
-        Si se pasa co2_value (emisiones proyectadas del plan manual sobre un horizonte
-        fijo), se usa ese valor comparable. Si no, cae al acumulado en vivo (legado).
-        """
-        if co2_value is not None:
-            self.baseline_emissions = float(co2_value)
-        else:
-            self.baseline_emissions = float(self.calculate_total_emissions()["total_co2"])
-
-    def set_optimized(self, co2_value: float | None = None) -> None:
-        """Fija las emisiones post-optimización (plan Newton-Raphson).
-
-        co2_value debe ser la proyección del plan optimizado sobre EL MISMO horizonte
-        y llegadas que la línea base, de modo que la reducción sea comparable y real.
-        """
-        if co2_value is not None:
-            self.optimized_emissions = float(co2_value)
-        else:
-            self.optimized_emissions = float(self.calculate_total_emissions()["total_co2"])
+    def set_optimized(self, co2_value: float) -> None:
+        """Fija el plan optimizado = proyección del reparto Newton (misma base)."""
+        self.optimized_emissions = float(co2_value)
         self.optimization_applied = True
 
     def export_to_excel(self, filename: str = "reporte_sostenibilidad.xlsx") -> str:
@@ -550,7 +409,9 @@ class SustainabilityAnalyzer:
         em = self.calculate_total_emissions()
         directions = ["N-S", "E-O", "S-N", "O-E"]
         dir_colors = ["58A6FF", "56D3E7", "B084FF", "FF945C"]
-        sim_time = self.time_history[-1] if self.time_history else 0.0
+        proj = self.current or {"times": [0.0], "q_ns": [0.0], "q_ew": [0.0]}
+        vh_dir, co2_dir = self._per_direction()
+        horizon = proj["times"][-1] if proj["times"] else 0.0
 
         # --- Paleta / estilos ---
         DARK = "0D1117"
@@ -680,10 +541,10 @@ class SustainabilityAnalyzer:
             cell.border = box
         for i, d in enumerate(directions):
             wd.cell(row=2 + i, column=1, value=d).border = box
-            a = wd.cell(row=2 + i, column=2, value=round(self.vehicle_hours_delay[i], 4))
+            a = wd.cell(row=2 + i, column=2, value=round(vh_dir[i], 4))
             a.number_format = "0.000"
             a.border = box
-            b = wd.cell(row=2 + i, column=3, value=round(self.cumulative_co2_emissions[i], 4))
+            b = wd.cell(row=2 + i, column=3, value=round(co2_dir[i], 4))
             b.number_format = "0.000"
             b.border = box
         wd.column_dimensions["A"].width = 14
@@ -715,15 +576,17 @@ class SustainabilityAnalyzer:
         wt.column_dimensions["B"].width = 12
         wt.column_dimensions["C"].width = 18
 
-        n = len(self.time_history)
+        # Trayectoria PROYECTADA del plan actual (misma fuente que los KPIs)
+        p_times, p_ns, p_ew = proj["times"], proj["q_ns"], proj["q_ew"]
+        n = len(p_times)
         stride = max(1, n // 250)  # downsample a ~250 puntos
         co2_acc = 0.0
         prev_q = None
         prev_t = None
         row = 2
         for k in range(n):
-            t = self.time_history[k]
-            q_total = float(sum(self.queue_history[k]))
+            t = p_times[k]
+            q_total = float(p_ns[k] + p_ew[k])
             if prev_t is not None:
                 dt = t - prev_t
                 co2_acc += 0.5 * (q_total + prev_q) * dt * self.co2_idle_rate
@@ -771,7 +634,7 @@ class SustainabilityAnalyzer:
         rows = [
             ("Gasolina equivalente (litros)", em["total_co2"] / 2.31),
             ("CO2 por vehiculo en cola (kg)", em["emissions_per_vehicle"]),
-            ("Tiempo total de simulacion (s)", sim_time),
+            ("Horizonte de proyeccion (s)", horizon),
         ]
         if self.optimization_applied and self.baseline_emissions > 0:
             rows += [
@@ -797,10 +660,8 @@ class SustainabilityAnalyzer:
 
     def reset(self) -> None:
         """Reinicia el analizador de sostenibilidad."""
-        self.time_history = []
-        self.queue_history = []
-        self.vehicle_hours_delay = [0.0, 0.0, 0.0, 0.0]
-        self.cumulative_co2_emissions = [0.0, 0.0, 0.0, 0.0]
+        self.current = None
+        self.demand = (0.0, 0.0)
         self.baseline_emissions = 0.0
         self.optimized_emissions = 0.0
         self.optimization_applied = False
