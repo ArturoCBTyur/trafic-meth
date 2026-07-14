@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from numerical_engine import TrafficSimulationEngine, composite_simpson
 
 
@@ -36,22 +34,28 @@ def test_simpson_integration() -> None:
 
 
 def test_newton_raphson() -> None:
-    """Prueba el método de Newton-Raphson."""
+    """Prueba Newton-Raphson matricial para el reparto óptimo de verde (Unidad I)."""
     print("=" * 60)
     print("TEST 2: NEWTON-RAPHSON AVANZADO (UNIDAD I)")
     print("=" * 60)
 
     engine = TrafficSimulationEngine(h=0.1)
 
-    initial_guess = np.array([0.3, 0.2])
-    print(f"Aproximación inicial: {initial_guess}")
+    # Demanda desbalanceada (arteria N-S) → el reparto debe favorecer a N-S
+    lambda_ns, lambda_ew = 1.1, 0.3
+    g_total = 50.0
+    print(f"Demanda: N-S={lambda_ns} veh/s, E-O={lambda_ew} veh/s, verde total={g_total}s")
 
-    result = engine.solve_newton_raphson(initial_guess, tol=1e-8, max_iter=50)
+    result = engine.solve_green_split(lambda_ns, lambda_ew, g_total)
+    g_ns, g_ew = result["solution"]
 
-    print(f"Solución encontrada: {result['solution']}")
-    print(f"Residuo: {result['residual']}")
-    print(f"Norma del residuo: {result['residual_norm']:.2e}")
-    print(f"Convergido: {result['converged']}")
+    print(f"Verde óptimo: N-S={g_ns:.2f}s, E-O={g_ew:.2f}s")
+    print(f"Norma del residuo ‖F(X)‖: {result['residual_norm']:.2e}")
+    print(f"Convergido: {result['converged']}  ·  iteraciones: {result['iterations']}")
+
+    assert result["converged"], "Newton-Raphson no convergió"
+    assert g_ns > g_ew, "el eje con más demanda debería recibir más verde"
+    assert abs((g_ns + g_ew) - g_total) < 1e-6, "el verde repartido debe sumar g_total"
     print()
 
 
@@ -97,11 +101,9 @@ def test_full_integration() -> None:
     for step in range(5):
         counts = [1, 2, 1, 0]
         result = engine.step(discrete_counts=counts)
-        print(f"Paso {step}: Flujos={[f'{f:.3f}' for f in result['flows']]}, "
-              f"Colas={[f'{q:.3f}' for q in result['queues']]}")
+        print(f"Paso {step}: Colas={[f'{q:.3f}' for q in result['queues']]}")
 
     print(f"\nEstado final de colas: {engine.queue_state}")
-    print(f"Flujos finales: {engine.flow_state}")
     print()
 
 
