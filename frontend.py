@@ -491,6 +491,10 @@ class TrafficSimulationFrontend:
         # eje de viaje, negativa = acercándose, positiva = ya cruzó}.
         self.vehicles: list[list[dict]] = [[], [], [], []]
         self.pending_spawns = [0, 0, 0, 0]
+        self.proj_timer = 0.0  # temporizador para refrescar la proyección de emisiones
+        # Muestras (t, conteos) para medir la demanda como TASA reciente (ventana móvil)
+        self.count_samples: list[tuple[float, tuple[int, ...]]] = []
+        self.DEMAND_WINDOW = 8.0  # s
 
         self.green_time_ns = 25.0
         self.green_time_ew = 25.0
@@ -518,6 +522,10 @@ class TrafficSimulationFrontend:
         self.status_message = ""
         self.status_timer = 0.0
         self.status_color = SUCCESS_COLOR
+
+        # Comparativa "antes/después" (momento pedagógico tras optimizar).
+        # dict con base_co2, opt_co2, base_ns/ew, opt_ns/ew, pct, timer.
+        self.comparison = None
 
         # Música de fondo (Tetris / Korobeiniki sintetizada). Falla en silencio si no
         # hay dispositivo de audio (p. ej. headless).
@@ -669,16 +677,41 @@ class TrafficSimulationFrontend:
                 self.traffic_light_timer = 0.0
 
     def measure_demand(self) -> tuple[float, float]:
-        """Estima la tasa de llegada media (veh/s) por eje desde los sensores.
+        """Estima la tasa de llegada (veh/s) por eje sobre una VENTANA móvil reciente.
 
-        lambda_eje = conteo acumulado del eje / tiempo transcurrido → tasa media real
-        de llegadas. Preserva el desbalance N-S vs E-O (más spawns en un eje ⇒ mayor
-        lambda ⇒ Newton le asigna más verde). Unidad III alimenta a la Unidad I.
+        lambda_eje = (conteo_ahora − conteo_hace_W_segundos) / W. Al usar una ventana
+        (no el acumulado total), la demanda refleja el tráfico reciente y no se dispara
+        por ráfagas de teclas antiguas. Preserva el desbalance N-S vs E-O.
         """
-        elapsed = max(1.0, self.engine.current_time)
-        lambda_ns = (self.discrete_counts[0] + self.discrete_counts[2]) / elapsed
-        lambda_ew = (self.discrete_counts[1] + self.discrete_counts[3]) / elapsed
-        return lambda_ns, lambda_ew
+        now = self.engine.current_time
+        # Buscar la muestra más antigua dentro de la ventana
+        oldest = None
+        for t, counts in self.count_samples:
+            if now - t <= self.DEMAND_WINDOW:
+                oldest = (t, counts)
+                break
+        if oldest is None or now - oldest[0] < 0.5:
+            # Sin ventana suficiente: cae a la tasa media desde el inicio
+            elapsed = max(1.0, now)
+            lambda_ns = (self.discrete_counts[0] + self.discrete_counts[2]) / elapsed
+            lambda_ew = (self.discrete_counts[1] + self.discrete_counts[3]) / elapsed
+            return lambda_ns, lambda_ew
+        t0, c0 = oldest
+        span = now - t0
+        lambda_ns = ((self.discrete_counts[0] - c0[0]) + (self.discrete_counts[2] - c0[2])) / span
+        lambda_ew = ((self.discrete_counts[1] - c0[1]) + (self.discrete_counts[3] - c0[3])) / span
+        return max(0.0, lambda_ns), max(0.0, lambda_ew)
+
+    def refresh_projection(self) -> None:
+        """Recalcula la proyección del plan ACTUAL (fuente única de CO2/retraso).
+
+        Usa la demanda medida y los tiempos de verde vigentes; corre Heun + Simpson vía
+        engine.project_emissions. Mantiene coherentes el número mostrado y la reducción.
+        """
+        lambda_ns, lambda_ew = self.measure_demand()
+        proj = self.engine.project_emissions(
+            self.green_time_ns, self.green_time_ew, lambda_ns, lambda_ew, self.red_time)
+        self.sustainability_analyzer.set_current(proj, (lambda_ns, lambda_ew))
 
     def optimize_traffic_signals(self) -> None:
         """Optimiza el reparto de verde acoplando las 3 unidades numéricas.
@@ -711,18 +744,27 @@ class TrafficSimulationFrontend:
         opt = self.engine.project_emissions(
             opt_ns, opt_ew, lambda_ns, lambda_ew, self.red_time)
 
-        # Aplicar tiempos y registrar comparación proyectada
+        # Aplicar tiempos y registrar comparación proyectada (misma fuente que el KPI)
         self.green_time_ns = opt_ns
         self.green_time_ew = opt_ew
         self.green_ns_slider.value = opt_ns
         self.green_ew_slider.value = opt_ew
         self.sustainability_analyzer.set_baseline(base["co2"])
         self.sustainability_analyzer.set_optimized(opt["co2"])
+        self.sustainability_analyzer.set_current(opt, (lambda_ns, lambda_ew))
 
         pct = (base["co2"] - opt["co2"]) / base["co2"] * 100 if base["co2"] > 1e-9 else 0.0
         self.set_status(
             f"Optimizado  NS={opt_ns:.0f}s  EO={opt_ew:.0f}s  ·  -{pct:.1f}% CO2",
             SUCCESS_COLOR)
+
+        # Comparativa visual antes/después — el "ajá" pedagógico
+        self.comparison = {
+            "base_co2": base["co2"], "opt_co2": opt["co2"],
+            "base_ns": g_total / 2.0, "base_ew": g_total / 2.0,
+            "opt_ns": opt_ns, "opt_ew": opt_ew,
+            "pct": pct, "timer": 8.0,
+        }
 
     # ------------------------------------------------------------------
     # Helpers de dibujo
@@ -1072,6 +1114,8 @@ class TrafficSimulationFrontend:
                     self.vehicles = [[], [], [], []]
                     self.pending_spawns = [0, 0, 0, 0]
                     self.spawn_timers = [0.0, 0.0, 0.0, 0.0]
+                    self.count_samples = []
+                    self.proj_timer = 0.0
                     self.spawn_probabilities = self._make_traffic_pattern()
                     self.spawn_probability = max(self.spawn_probabilities)
                     self.baseline_set = False
@@ -1115,7 +1159,8 @@ class TrafficSimulationFrontend:
 
     def export_excel(self) -> None:
         """Exporta el reporte de sostenibilidad a un archivo Excel (.xlsx) con gráficos."""
-        if not self.sustainability_analyzer.time_history:
+        self.refresh_projection()  # asegura una proyección al día
+        if not self.sustainability_analyzer.current:
             self.set_status("Sin datos aún — spawnea tráfico primero", WARN_COLOR)
             return
         try:
@@ -1149,6 +1194,71 @@ class TrafficSimulationFrontend:
                            (toast.x + pad_x, toast.centery), 4)
         self.screen.blit(text_surf, (toast.x + pad_x + 12, toast.y + pad_y))
 
+    def draw_comparison_overlay(self) -> None:
+        """Tarjeta flotante 'antes → después' tras optimizar (momento pedagógico).
+
+        Compara el plan MANUAL (reparto equitativo) contra el ÓPTIMO de Newton
+        mostrando dos barras de CO2 proyectado y el reparto de verde de cada plan.
+        """
+        c = self.comparison
+        if not c or c["timer"] <= 0:
+            return
+        # Fade-in rápido (0.4s) y fade-out en el último 1.2s
+        alpha = min(1.0, (8.0 - c["timer"]) / 0.4, c["timer"] / 1.2)
+        alpha = max(0.0, alpha)
+
+        w = int(min(self.center_width - 24, 380))
+        h = 196
+        card = pygame.Rect(0, 0, w, h)
+        card.centerx = self.center_start_x + self.center_width // 2
+        card.top = self.margin + 20
+
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (16, 20, 28, int(244 * alpha)), surf.get_rect(), border_radius=16)
+        pygame.draw.rect(surf, (*SUCCESS_COLOR, int(150 * alpha)), surf.get_rect(),
+                         width=1, border_radius=16)
+
+        def bl(font, text, color, x, y):
+            t = font.render(text, True, color)
+            t.set_alpha(int(255 * alpha))
+            surf.blit(t, (x, y))
+
+        pad = 18
+        bl(self.font_semibold, "OPTIMIZACIÓN  ·  ANTES → DESPUÉS", TEXT_COLOR, pad, 14)
+        bl(self.font_tiny, "CO2 proyectado sobre el mismo horizonte", TEXT_DIM, pad, 38)
+
+        # Barras de CO2 (base vs óptimo), escaladas al mayor
+        base_co2, opt_co2 = c["base_co2"], c["opt_co2"]
+        max_co2 = max(base_co2, opt_co2, 1e-9)
+        bar_x = pad + 66
+        bar_w = w - bar_x - pad - 60
+        rows = [
+            ("Manual", base_co2, ERROR_COLOR, f'{c["base_ns"]:.0f}/{c["base_ew"]:.0f}s'),
+            ("Óptimo", opt_co2, SUCCESS_COLOR, f'{c["opt_ns"]:.0f}/{c["opt_ew"]:.0f}s'),
+        ]
+        ry = 62
+        for label, val, color, split in rows:
+            bl(self.font_tiny, label, TEXT_DIM, pad, ry + 1)
+            track = pygame.Rect(bar_x, ry, bar_w, 14)
+            pygame.draw.rect(surf, (38, 43, 54, int(255 * alpha)), track, border_radius=7)
+            fw = int((val / max_co2) * bar_w)
+            if fw > 0:
+                pygame.draw.rect(surf, (*color, int(255 * alpha)),
+                                 (bar_x, ry, fw, 14), border_radius=7)
+            bl(self.font_mono, f"{val:.1f}kg", TEXT_COLOR, bar_x + bar_w + 8, ry - 1)
+            bl(self.font_tiny, f"verde {split}", TEXT_FAINT, bar_x, ry + 18)
+            ry += 44
+
+        # Cifra grande de reducción
+        pct = c["pct"]
+        pcol = SUCCESS_COLOR if pct > 0 else ERROR_COLOR
+        big = self.font_large.render(f"-{abs(pct):.1f}%", True, pcol)
+        big.set_alpha(int(255 * alpha))
+        surf.blit(big, (pad, h - 42))
+        bl(self.font_tiny, "menos contaminación", TEXT_DIM, pad + big.get_width() + 10, h - 34)
+
+        self.screen.blit(surf, card.topleft)
+
     def run(self) -> None:
         """Bucle principal de la simulación."""
         dt = 0.016
@@ -1168,10 +1278,24 @@ class TrafficSimulationFrontend:
             ]
             self.engine.step(discrete_counts=self.discrete_counts, green_mask=green_mask)
 
-            self.sustainability_analyzer.record_state(self.engine.current_time, self.engine.queue_state)
+            # Muestrea conteos para la demanda por ventana (~5 Hz) y poda lo viejo
+            now = self.engine.current_time
+            if not self.count_samples or now - self.count_samples[-1][0] >= 0.2:
+                self.count_samples.append((now, tuple(self.discrete_counts)))
+            self.count_samples = [s for s in self.count_samples
+                                  if now - s[0] <= self.DEMAND_WINDOW + 0.5]
+
+            # Refresca la proyección (fuente única de CO2/retraso) ~1 vez por segundo.
+            # No cada frame: project_emissions corre cientos de pasos de Heun.
+            self.proj_timer += dt
+            if self.proj_timer >= 1.0:
+                self.proj_timer = 0.0
+                self.refresh_projection()
 
             if self.status_timer > 0:
                 self.status_timer -= dt
+            if self.comparison and self.comparison["timer"] > 0:
+                self.comparison["timer"] -= dt
 
             # Dibujar todo
             self._draw_background()
@@ -1180,6 +1304,7 @@ class TrafficSimulationFrontend:
             self.draw_vehicle_queues()
             self.draw_left_panel()
             self.draw_right_panel()
+            self.draw_comparison_overlay()
             self.draw_status_message()
             self.help_overlay.draw(self.screen, {
                 "title": self.font_large, "section": self.font_semibold,
